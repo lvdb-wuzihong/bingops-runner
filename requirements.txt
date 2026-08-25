@@ -1,0 +1,9 @@
+# bingops-runner 运行依赖（Python >= 3.11）
+ansible-runner>=2.4
+ansible-core>=2.16
+confluent-kafka>=2.4
+hvac>=2.1
+
+# 开发依赖
+pytest>=8.0
+pytest-cov>=5.0
