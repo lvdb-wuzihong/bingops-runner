@@ -9,6 +9,7 @@
 """
 
 import json
+import glob
 import logging
 import math
 import os
@@ -126,16 +127,34 @@ class AnsibleExecutor:
         )
 
         if res.status == "canceled" or res.rc == "timeout":
+            self._log_artifact_tail(batch_dir)
             raise StepTimeout(f"step 超时（{timeout_sec}s）被强制终止")
         logger.info("ansible 批次结束: status=%s rc=%s", res.status, res.rc)
         rc = int(res.rc) if isinstance(res.rc, int) else 1
         if rc != 0:
+            # 解析/启动阶段的错误不产生 host 事件，只能从 stdout 原文看
+            self._log_artifact_tail(batch_dir)
             error = f"playbook 退出码 {rc}"
             if res.status:
                 error += f"（status={res.status}）"
             event_cb("error", None, error)
             return StepResult(rc=rc, error=error)
         return StepResult(rc=0)
+
+    # ------------------------------------------------------------------
+    # 失败时从 artifacts 捞 ansible stdout 原文
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _log_artifact_tail(batch_dir: str, lines: int = 60) -> None:
+        for stdout_file in sorted(glob.glob(
+                os.path.join(batch_dir, "artifacts", "*", "stdout"))):
+            try:
+                with open(stdout_file, encoding="utf-8", errors="replace") as f:
+                    tail = f.readlines()[-lines:]
+                logger.error("ansible stdout 原文 (%s):\n%s",
+                             stdout_file, "".join(tail))
+            except OSError as e:
+                logger.warning("读取 artifact 失败: %s", e)
 
     # ------------------------------------------------------------------
     # ansible-runner 事件 → 日志行
