@@ -58,7 +58,15 @@ class JobWorker:
         if self._seen(message_id):
             logger.info("重复 message_id=%s，跳过", message_id)
             return
-        msg = DispatchMessage.from_dict(payload)
+        try:
+            msg = DispatchMessage.from_dict(payload)
+        except (KeyError, TypeError, ValueError) as e:
+            # 契约校验失败：尽力回流 prepare 失败事件，不让 execution 在控制面假死
+            logger.error("dispatch 契约校验失败: %s payload=%s", e, payload)
+            execution_id = payload.get("execution_id")
+            if execution_id is not None:
+                self._emit_contract_failure(int(execution_id), str(e))
+            return
         logger.info("收到 dispatch: command=%s execution_id=%s code_ref=%s",
                     msg.command, msg.execution_id, msg.code_ref)
         t = threading.Thread(
@@ -80,6 +88,24 @@ class JobWorker:
             while len(self._dedup) > _DEDUP_MAX:
                 self._dedup.popitem(last=False)
             return False
+
+    def _emit_contract_failure(self, execution_id: int, error: str) -> None:
+        """消息无法解析时，以 prepare 伪步骤告知控制面 execution 失败。"""
+        try:
+            self._producer.send_event(StepEvent(
+                message_id=str(uuid.uuid4()), execution_id=execution_id,
+                step_key="prepare", attempt_type="do",
+                event_type="step_started", seq=1,
+            ))
+            self._producer.send_event(StepEvent(
+                message_id=str(uuid.uuid4()), execution_id=execution_id,
+                step_key="prepare", attempt_type="do",
+                event_type="step_finished", seq=2,
+                status="failed", error=f"dispatch 契约校验失败: {error}",
+            ))
+            self._producer.flush()
+        except Exception:
+            logger.exception("契约失败事件回流失败 execution_id=%s", execution_id)
 
     def _guarded_run(self, msg: DispatchMessage) -> None:
         # 限流：超出并发上限时在此等待空位
