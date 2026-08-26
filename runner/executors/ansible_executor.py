@@ -37,6 +37,13 @@ class AnsibleExecutor:
         if not step.playbook or not os.path.isfile(playbook):
             raise ExecutorError(f"playbook 不存在: {step.playbook}")
 
+        # role 搜索路径：覆盖仓库两种常见布局，绝对路径不受 ansible cwd 影响
+        env = dict(envvars)
+        env.setdefault("ANSIBLE_ROLES_PATH", os.pathsep.join([
+            os.path.join(repo_dir, "ansible", "roles"),
+            os.path.join(repo_dir, "roles"),
+        ]))
+
         batches = self._split_batches(inventory_path, step.serial)
         if step.serial:
             event_cb("info", None,
@@ -50,7 +57,7 @@ class AnsibleExecutor:
 
             result = self._run_batch(
                 step=step, playbook=playbook, hosts=batch,
-                inventory_path=inventory_path, envvars=envvars,
+                inventory_path=inventory_path, envvars=env,
                 extra_vars=extra_vars, workdir=workdir,
                 timeout_sec=timeout_sec, event_cb=event_cb,
             )
