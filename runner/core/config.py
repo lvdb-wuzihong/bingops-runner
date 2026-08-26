@@ -7,6 +7,7 @@
 必填项缺失在启动时即抛 ConfigError（fail fast），避免任务半途失败。
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from runner.core.exceptions import ConfigError
+
+logger = logging.getLogger(__name__)
 
 
 def _env(name: str, default: str | None = None) -> str:
@@ -48,7 +51,11 @@ def _load_dotenv_file() -> None:
         path = Path(candidate)
         if path.is_file():
             load_dotenv(dotenv_path=path, override=False)
+            # 启动诊断日志此时 logging 尚未配置，用 warning 级别确保可见
+            logger.warning("已加载配置文件: %s", path)
             return
+    logger.warning("未找到 .env 配置文件（候选: %s），将仅使用环境变量",
+                   ", ".join(candidates))
 
 
 @dataclass(frozen=True)
