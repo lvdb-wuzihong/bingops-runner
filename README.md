@@ -46,7 +46,7 @@ runner/
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env   # 填入实际 Kafka/Vault/GitLab 配置
+copy .env.example .env   # 填入实际配置，启动时自动加载（环境变量优先）
 python -m runner
 ```
 

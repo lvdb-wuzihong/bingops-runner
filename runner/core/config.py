@@ -1,10 +1,16 @@
 """运行配置：全部来自环境变量，容器化部署时注入。
 
+本地开发可额外用 .env 文件（默认当前目录，可用 RUNNER_ENV_FILE 指定路径），
+环境变量始终优先于文件值；生产容器注入场景无感知。
+
 必填项缺失在启动时即抛 ConfigError（fail fast），避免任务半途失败。
 """
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from runner.core.exceptions import ConfigError
 
@@ -24,6 +30,14 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         raise ConfigError(f"环境变量 {name} 必须为整数，当前值: {raw}")
+
+
+def _load_dotenv_file() -> None:
+    """可选加载 .env 文件：文件存在才读，且环境变量优先（override=False）。"""
+    env_file = os.environ.get("RUNNER_ENV_FILE", ".env")
+    path = Path(env_file)
+    if path.is_file():
+        load_dotenv(dotenv_path=path, override=False)
 
 
 @dataclass(frozen=True)
@@ -53,6 +67,7 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        _load_dotenv_file()
         return cls(
             kafka_bootstrap_servers=_env("KAFKA_BOOTSTRAP_SERVERS"),
             kafka_dispatch_topic=os.environ.get("KAFKA_DISPATCH_TOPIC", "job-dispatch"),

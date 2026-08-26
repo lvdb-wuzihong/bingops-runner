@@ -3,6 +3,7 @@ ansible-runner>=2.4
 ansible-core>=2.16
 confluent-kafka>=2.4
 hvac>=2.1
+python-dotenv>=1.0
 
 # 开发依赖
 pytest>=8.0
