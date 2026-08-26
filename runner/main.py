@@ -65,7 +65,9 @@ class JobWorker:
             logger.error("dispatch 契约校验失败: %s payload=%s", e, payload)
             execution_id = payload.get("execution_id")
             if execution_id is not None:
-                self._emit_contract_failure(int(execution_id), str(e))
+                # attempt_type 跟随 command：rollback 下发失败时控制面才能收到回滚链的收尾信号
+                attempt = "rollback" if payload.get("command") == "rollback" else "do"
+                self._emit_contract_failure(int(execution_id), str(e), attempt)
             return
         logger.info("收到 dispatch: command=%s execution_id=%s code_ref=%s",
                     msg.command, msg.execution_id, msg.code_ref)
@@ -89,17 +91,18 @@ class JobWorker:
                 self._dedup.popitem(last=False)
             return False
 
-    def _emit_contract_failure(self, execution_id: int, error: str) -> None:
+    def _emit_contract_failure(self, execution_id: int, error: str,
+                               attempt_type: str = "do") -> None:
         """消息无法解析时，以 prepare 伪步骤告知控制面 execution 失败。"""
         try:
             self._producer.send_event(StepEvent(
                 message_id=str(uuid.uuid4()), execution_id=execution_id,
-                step_key="prepare", attempt_type="do",
+                step_key="prepare", attempt_type=attempt_type,
                 event_type="step_started", seq=1,
             ))
             self._producer.send_event(StepEvent(
                 message_id=str(uuid.uuid4()), execution_id=execution_id,
-                step_key="prepare", attempt_type="do",
+                step_key="prepare", attempt_type=attempt_type,
                 event_type="step_finished", seq=2,
                 status="failed", error=f"dispatch 契约校验失败: {error}",
             ))

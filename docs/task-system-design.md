@@ -119,6 +119,11 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 
 回滚执行在 `job_steps` 记为同 step_key、`attempt_type='rollback'` 的新行，日志/审计天然齐全。
 
+回滚链纪律（控制面实现）：
+- 回滚下发只包含**已完成且 rollbackable** 的步骤（控制面按 `job_steps` 状态过滤）；runner 无状态，不知道哪些步骤跑过，给什么跑什么
+- 零已完成步骤的失败（如 prepare 阶段失败）直接落终态，不进 `rolling_back`
+- 回滚下发后收到失败事件（含 runner 契约校验失败回流的 rollback attempt 事件）落 `rollback_failed`/`partial_rollback`，不得无限等待
+
 ---
 
 ## 5. Inventory 与网络
