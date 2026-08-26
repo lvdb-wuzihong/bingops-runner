@@ -81,8 +81,11 @@ steps:
 
 ```yaml
 # roles/app_restart/tasks/main.yml
-- include_tasks: "{{ 'undo.yml' if bingops_action | default('do') == 'undo' else 'do.yml' }}"
+- include_tasks:
+    file: "{{ 'undo.yml' if bingops_action | default('do') == 'undo' else 'do.yml' }}"
 ```
+
+（必须用 `file:` 映射形式；单行简写里的 `==` 会被 mod_args 误拆为 k=v 选项报 Invalid options）
 
 - 操作与逆操作同仓同文件，永不漂移；引擎回滚无需独立 rollback playbook 路径
 - 步内瞬时失败用 ansible 原生 `block/rescue/always` 自愈（如起服失败先尝试拉起），与步级回滚互补不替代

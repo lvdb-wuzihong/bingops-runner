@@ -111,7 +111,12 @@ class AnsibleExecutor:
         def cancel_callback() -> bool:
             return time.monotonic() >= deadline
 
+        # 主机级事件计数：rc=0 但零事件 = 空跑（hosts 不匹配等），静默成功比报错更危险
+        host_event_count = {"n": 0}
+
         def event_handler(data: dict) -> bool:
+            if data.get("event", "").startswith("runner_on_"):
+                host_event_count["n"] += 1
             level, host, line = self._describe_event(data)
             if line:
                 # error 行同时落 runner 进程日志：bingops 日志链路出问题时 kubectl logs 仍可排障
@@ -138,6 +143,11 @@ class AnsibleExecutor:
             raise StepTimeout(f"step 超时（{timeout_sec}s）被强制终止")
         logger.info("ansible 批次结束: status=%s rc=%s", res.status, res.rc)
         rc = int(res.rc) if isinstance(res.rc, int) else 1
+        if rc == 0 and host_event_count["n"] == 0:
+            # 典型原因：play 的 hosts: 写了固定组名，与 runner ad-hoc inventory 不匹配
+            self._log_artifact_tail(batch_dir)
+            return StepResult(rc=1,
+                              error="play 未匹配到任何主机（检查 play hosts: 是否为 all）")
         if rc != 0:
             # 解析/启动阶段的错误不产生 host 事件，只能从 stdout 原文看
             snippet = self._log_artifact_tail(batch_dir)
