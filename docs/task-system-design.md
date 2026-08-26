@@ -57,6 +57,7 @@ UI ──→ bingops（控制面，无状态 FastAPI）
 ```yaml
 name: 批量重启服务
 category: restart
+target_models: [aliyun_ecs, gcp_compute]  # 目标范围硬校验；P1 默认即此两类
 risk_level: medium            # low/medium/high/critical，叠加环境维度提级（P3）
 auto_rollback: false          # opt-in 自动回滚，默认手动
 params_schema:
@@ -111,7 +112,7 @@ steps:
 ### 4.2 状态机
 
 ```
-execution: pending → awaiting_approval(P3) → running → success
+execution: pending → awaiting_approval(P3) → running → success / cancelled
                                        ↘ failed → rolling_back → rolled_back / partial_rollback
 step:      pending → running → success / failed / skipped / rolled_back / rollback_failed
 ```
@@ -123,7 +124,9 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 ## 5. Inventory 与网络
 
 - **Inventory 源 = CMDB**：下发时 bingops 从目标快照生成 `[{resource_id, name, ip, ssh_user, ssh_key_ref}]`；runner 拼 inventory JSON，资源选择器能力在此变现
+- **目标范围硬校验**：runbook.`target_models` 声明 scope（默认 `[aliyun_ecs, gcp_compute]`），`create_execution` 对快照 model_code 越界即 400；前端选择器按 target_models 传 `model_id` 过滤（UX 层，不替代后端校验）；K8s 对象 P2 以 local 模式扩入
 - **网络可达**：runner 部署于同 VPC 直连 22 端口；跨 VPC/IDC 留 runbook 级 `proxy_hop` 字段（P1 不实现，渲染为 ProxyCommand）
+- **connection 契约**（runbook 级）：`ssh_user` 登录用户 / `ssh_key_ref` Vault 键名 / `become` 默认 false / `become_method` 默认 sudo / `become_user` 默认 root；**sudo 密码不进配置**：宿主机 NOPASSWD sudoers 由 bootstrap runbook 统刷，退路 `become_password_ref` 走 Vault+no_log；runner 渲染为 inventory 变量 `ansible_become*`
 
 ---
 
@@ -173,6 +176,8 @@ CREATE TABLE runbooks (
     description   TEXT,
     params_schema JSONB        NOT NULL DEFAULT '{}',   -- 用户入参动态表单
     steps         JSONB        NOT NULL DEFAULT '[]',   -- 有序步骤，契约见 §3
+    connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
+    target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
     version       INT          NOT NULL DEFAULT 1,      -- 编辑 +1，execution 快照
     risk_level    VARCHAR(16)  NOT NULL DEFAULT 'low',
     auto_rollback BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -193,6 +198,7 @@ CREATE TABLE job_executions (
     params           JSONB        NOT NULL DEFAULT '{}',
     target_resources JSONB        NOT NULL DEFAULT '[]',-- [{resource_id,name,ip,ssh_user,ssh_key_ref}]
     steps_snapshot   JSONB        NOT NULL DEFAULT '[]',-- 创建时步骤快照
+    connection       JSONB        NOT NULL DEFAULT '{}',-- 连接配置快照（回滚下发同需）
     status           VARCHAR(32)  NOT NULL DEFAULT 'pending',
     rollback_policy  VARCHAR(16)  NOT NULL DEFAULT 'manual',
     ticket_id        BIGINT,                            -- P3 审批挂接
@@ -255,7 +261,9 @@ CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
   "code_ref": "v1.2.0",
   "params": {"svc": "order-soa"},
   "targets": [{"resource_id": 1, "name": "web-1", "ip": "10.0.0.1",
-               "ssh_user": "ops", "ssh_key_ref": "prod-node-key"}],
+               "ssh_user": "ops", "ssh_key_ref": "prod-node-key",
+               "become": true, "become_user": "root", "become_method": "sudo",
+               "become_password_ref": "prod-sudo-pass"}],
   "steps": [{"key": "restart_app", "type": "ansible",
              "playbook": "ansible/playbooks/app_restart.yml",
              "timeout_sec": 600, "serial": "30%", "batch_pause_sec": 60,
@@ -271,7 +279,7 @@ CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
 ```json
 {"message_id": "uuid4", "execution_id": 123, "step_key": "restart_app",
  "attempt_type": "do",
- "event_type": "step_started | log | step_finished",
+ "event_type": "step_started | log | step_finished | execution_finished",
  "seq": 17, "level": "info", "host": "web-1",
  "line": "TASK [restart] starting...",
  "status": "success | failed", "exit_code": 0, "error": null,

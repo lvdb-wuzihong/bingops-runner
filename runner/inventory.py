@@ -41,6 +41,7 @@ class InventoryBuilder:
 
         envvars: dict[str, str] = {"ANSIBLE_HOST_KEY_CHECKING": "False"}
         keyfile_by_ref: dict[str, str] = {}
+        become_password_by_ref: dict[str, str] = {}
         hosts: dict[str, Any] = {}
         try:
             for ref in sorted({t.ssh_key_ref for t in targets}):
@@ -54,18 +55,36 @@ class InventoryBuilder:
                 keyfile_by_ref[ref] = path
                 envvars[f"ANSIBLE_PRIVATE_KEY_FILE_{self._env_suffix(ref)}"] = path
 
+            # become 密码：同样只存内存不进盘，取出即注册脱敏
+            for ref in sorted({t.become_password_ref for t in targets
+                               if t.become_password_ref}):
+                password = self._vault.get_secret(ref)
+                if redactor is not None:
+                    redactor.register(password)
+                become_password_by_ref[ref] = password
+
             for t in targets:
-                hosts[t.name] = {
+                host_vars: dict[str, Any] = {
                     "ansible_host": t.ip,
                     "ansible_user": t.ssh_user,
                     "ansible_ssh_private_key_file": keyfile_by_ref[t.ssh_key_ref],
                     "ansible_ssh_common_args": _SSH_ARGS,
                 }
+                if t.become:
+                    host_vars["ansible_become"] = True
+                    host_vars["ansible_become_user"] = t.become_user or "root"
+                    host_vars["ansible_become_method"] = t.become_method or "sudo"
+                    if t.become_password_ref:
+                        host_vars["ansible_become_password"] = \
+                            become_password_by_ref[t.become_password_ref]
+                hosts[t.name] = host_vars
 
             inventory = {"all": {"hosts": hosts}}
             inventory_path = os.path.join(workdir, "inventory.json")
             with open(inventory_path, "w", encoding="utf-8") as f:
                 json.dump(inventory, f, indent=2)
+            # host_vars 可能含 become_password 明文，与 keyfile 同等防护
+            self._chmod_0600(inventory_path)
 
             yield {"inventory_path": inventory_path, "envvars": envvars}
         finally:

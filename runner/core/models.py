@@ -13,13 +13,22 @@ def utc_now_iso() -> str:
 
 @dataclass
 class Target:
-    """目标主机（来自 CMDB 目标快照）。"""
+    """目标主机（来自 CMDB 目标快照）。
+
+    ssh_user/ssh_key_ref 的 override 由控制面在生成快照时解析合并，
+    runner 只认快照里的最终值；become 系字段同理，
+    become_password 只带钥匙名，runner 现场从 Vault 取。
+    """
 
     resource_id: int
     name: str
     ip: str
     ssh_user: str
     ssh_key_ref: str
+    become: bool = False
+    become_user: str | None = None
+    become_method: str | None = None
+    become_password_ref: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Target":
@@ -29,6 +38,10 @@ class Target:
             ip=d["ip"],
             ssh_user=d.get("ssh_user", "ops"),
             ssh_key_ref=d["ssh_key_ref"],
+            become=bool(d.get("become", False)),
+            become_user=d.get("become_user"),
+            become_method=d.get("become_method"),
+            become_password_ref=d.get("become_password_ref"),
         )
 
 
