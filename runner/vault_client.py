@@ -20,10 +20,21 @@ _DEFAULT_TTL_SEC = 300
 
 
 def _vault_error_detail(e: Exception) -> str:
-    """hvac 异常的 str() 常丢 errors 列表，这里把状态码和 errors 都挖出来。"""
-    status = getattr(getattr(e, "response", None), "status_code", None)
-    errors = getattr(e, "errors", None) or str(e)
-    return f"status={status} errors={errors}"
+    """hvac 异常的 str() 常丢 errors 列表，这里把类型/状态码/响应体原文都挖出来。"""
+    parts = [type(e).__name__]
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        parts.append(f"status={getattr(resp, 'status_code', None)}")
+        try:
+            parts.append(f"body={resp.text[:300]}")
+        except Exception:
+            pass
+    errors = getattr(e, "errors", None)
+    if errors:
+        parts.append(f"errors={errors}")
+    if str(e):
+        parts.append(f"msg={str(e)}")
+    return " | ".join(parts)
 
 
 class VaultClient:
