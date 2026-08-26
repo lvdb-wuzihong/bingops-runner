@@ -1,7 +1,8 @@
 """运行配置：全部来自环境变量，容器化部署时注入。
 
-本地开发可额外用 .env 文件（默认当前目录，可用 RUNNER_ENV_FILE 指定路径），
-环境变量始终优先于文件值；生产容器注入场景无感知。
+本地/容器内可额外用 .env 文件，环境变量始终优先于文件值。
+查找顺序：RUNNER_ENV_FILE 指定路径 > ./.env > /app/.env > /etc/bingops-runner/.env，
+取第一个存在的文件；生产容器注入场景无感知。
 
 必填项缺失在启动时即抛 ConfigError（fail fast），避免任务半途失败。
 """
@@ -32,12 +33,22 @@ def _env_int(name: str, default: int) -> int:
         raise ConfigError(f"环境变量 {name} 必须为整数，当前值: {raw}")
 
 
+# 未显式指定时的 .env 候选路径（容器镜像 WORKDIR=/app）
+_DEFAULT_ENV_FILES = (".env", "/app/.env", "/etc/bingops-runner/.env")
+
+
 def _load_dotenv_file() -> None:
-    """可选加载 .env 文件：文件存在才读，且环境变量优先（override=False）。"""
-    env_file = os.environ.get("RUNNER_ENV_FILE", ".env")
-    path = Path(env_file)
-    if path.is_file():
-        load_dotenv(dotenv_path=path, override=False)
+    """可选加载 .env 文件：按优先级取第一个存在的文件，环境变量优先（override=False）。"""
+    candidates: list[str] = []
+    explicit = os.environ.get("RUNNER_ENV_FILE")
+    if explicit:
+        candidates.append(explicit)
+    candidates.extend(_DEFAULT_ENV_FILES)
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.is_file():
+            load_dotenv(dotenv_path=path, override=False)
+            return
 
 
 @dataclass(frozen=True)
