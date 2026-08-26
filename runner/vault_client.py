@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TTL_SEC = 300
 
 
+def _vault_error_detail(e: Exception) -> str:
+    """hvac 异常的 str() 常丢 errors 列表，这里把状态码和 errors 都挖出来。"""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    errors = getattr(e, "errors", None) or str(e)
+    return f"status={status} errors={errors}"
+
+
 class VaultClient:
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -37,7 +44,7 @@ class VaultClient:
                 secret_id=self._config.vault_secret_id,
             )
         except Exception as e:
-            raise VaultError(f"Vault AppRole 登录失败: {e}") from e
+            raise VaultError(f"Vault AppRole 登录失败: {_vault_error_detail(e)}") from e
         lease = resp.get("auth", {}).get("lease_duration", _DEFAULT_TTL_SEC)
         self._client = client
         # 提前 60s 过期，避免边界竞态
@@ -59,7 +66,7 @@ class VaultClient:
             )
             value = resp["data"]["data"].get("value")
         except Exception as e:
-            raise VaultError(f"读取 secret 失败 [{key_ref}]: {e}") from e
+            raise VaultError(f"读取 secret 失败 [{key_ref}]: {_vault_error_detail(e)}") from e
         if not value:
             raise VaultError(f"secret [{key_ref}] 缺少 value 字段")
 
