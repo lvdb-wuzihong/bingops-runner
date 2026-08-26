@@ -133,10 +133,12 @@ class AnsibleExecutor:
         rc = int(res.rc) if isinstance(res.rc, int) else 1
         if rc != 0:
             # 解析/启动阶段的错误不产生 host 事件，只能从 stdout 原文看
-            self._log_artifact_tail(batch_dir)
+            snippet = self._log_artifact_tail(batch_dir)
             error = f"playbook 退出码 {rc}"
             if res.status:
                 error += f"（status={res.status}）"
+            if snippet:
+                error += f"：{snippet}"
             event_cb("error", None, error)
             return StepResult(rc=rc, error=error)
         return StepResult(rc=0)
@@ -145,16 +147,26 @@ class AnsibleExecutor:
     # 失败时从 artifacts 捞 ansible stdout 原文
     # ------------------------------------------------------------------
     @staticmethod
-    def _log_artifact_tail(batch_dir: str, lines: int = 60) -> None:
+    def _log_artifact_tail(batch_dir: str, lines: int = 60) -> str:
+        """记录 stdout 尾部全文，并返回一句可进 error 消息的摘要。"""
+        snippet = ""
         for stdout_file in sorted(glob.glob(
                 os.path.join(batch_dir, "artifacts", "*", "stdout"))):
             try:
                 with open(stdout_file, encoding="utf-8", errors="replace") as f:
-                    tail = f.readlines()[-lines:]
-                logger.error("ansible stdout 原文 (%s):\n%s",
-                             stdout_file, "".join(tail))
+                    tail_lines = f.readlines()[-lines:]
             except OSError as e:
                 logger.warning("读取 artifact 失败: %s", e)
+                continue
+            tail = "".join(tail_lines)
+            logger.error("ansible stdout 原文 (%s):\n%s", stdout_file, tail)
+            if not snippet:
+                # 优先取 [ERROR]/ERROR!/FAILED 行，否则取最后非空行
+                key = [l.strip() for l in tail_lines
+                       if l.strip().startswith(("[ERROR]", "ERROR!", "fatal:"))]
+                pick = key[0] if key else (tail_lines[-1].strip() if tail_lines else "")
+                snippet = pick[:200]
+        return snippet
 
     # ------------------------------------------------------------------
     # ansible-runner 事件 → 日志行
