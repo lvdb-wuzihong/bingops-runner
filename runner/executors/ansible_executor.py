@@ -106,6 +106,9 @@ class AnsibleExecutor:
         def event_handler(data: dict) -> bool:
             level, host, line = self._describe_event(data)
             if line:
+                # error 行同时落 runner 进程日志：bingops 日志链路出问题时 kubectl logs 仍可排障
+                if level == "error":
+                    logger.error("ansible: host=%s %s", host, line)
                 event_cb(level, host, line)
             return True
 
@@ -124,6 +127,7 @@ class AnsibleExecutor:
 
         if res.status == "canceled" or res.rc == "timeout":
             raise StepTimeout(f"step 超时（{timeout_sec}s）被强制终止")
+        logger.info("ansible 批次结束: status=%s rc=%s", res.status, res.rc)
         rc = int(res.rc) if isinstance(res.rc, int) else 1
         if rc != 0:
             error = f"playbook 退出码 {rc}"
