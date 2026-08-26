@@ -110,7 +110,7 @@ class AnsibleExecutor:
             return True
 
         logger.info("ansible 批次执行: playbook=%s hosts=%s", playbook, hosts)
-        res, _ = ansible_runner.interface.run(
+        res = ansible_runner.run(
             private_data_dir=batch_dir,
             playbook=playbook,
             inventory=inv,
@@ -122,7 +122,7 @@ class AnsibleExecutor:
             quiet=True,
         )
 
-        if res.rc == "timeout":
+        if res.status == "canceled" or res.rc == "timeout":
             raise StepTimeout(f"step 超时（{timeout_sec}s）被强制终止")
         rc = int(res.rc) if isinstance(res.rc, int) else 1
         if rc != 0:
