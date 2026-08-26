@@ -15,16 +15,15 @@ def utc_now_iso() -> str:
 class Target:
     """目标主机（来自 CMDB 目标快照）。
 
-    ssh_user/ssh_key_ref 的 override 由控制面在生成快照时解析合并，
-    runner 只认快照里的最终值；become 系字段同理，
+    凭据字段可缺省，由消息级 connection 打底后在 DispatchMessage 解析时合并；
     become_password 只带钥匙名，runner 现场从 Vault 取。
     """
 
     resource_id: int
     name: str
     ip: str
-    ssh_user: str
-    ssh_key_ref: str
+    ssh_user: str = "ops"
+    ssh_key_ref: str = ""
     become: bool = False
     become_user: str | None = None
     become_method: str | None = None
@@ -32,6 +31,8 @@ class Target:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Target":
+        if not d.get("ssh_key_ref"):
+            raise KeyError("ssh_key_ref")
         return cls(
             resource_id=int(d["resource_id"]),
             name=d["name"],
@@ -74,7 +75,11 @@ class StepSpec:
 
 @dataclass
 class DispatchMessage:
-    """job-dispatch 消息；command=execute | rollback。"""
+    """job-dispatch 消息；command=execute | rollback。
+
+    凭据/提权采用两级结构：消息级 connection（runbook 声明）为底，
+    target 级同名字段可覆盖；解析时在此合并，下游只看到最终值。
+    """
 
     message_id: str
     command: str
@@ -83,18 +88,27 @@ class DispatchMessage:
     params: dict[str, Any]
     targets: list[Target]
     steps: list[StepSpec]
+    connection: dict[str, Any] = field(default_factory=dict)
     rollback_of: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DispatchMessage":
+        conn = d.get("connection") or {}
+        targets: list[Target] = []
+        for t in d.get("targets") or []:
+            # connection 打底，target 级非空字段覆盖
+            merged = {k: v for k, v in conn.items() if v is not None}
+            merged.update({k: v for k, v in t.items() if v is not None})
+            targets.append(Target.from_dict(merged))
         return cls(
             message_id=d["message_id"],
             command=d["command"],
             execution_id=int(d["execution_id"]),
             code_ref=d["code_ref"],
             params=d.get("params") or {},
-            targets=[Target.from_dict(t) for t in d.get("targets") or []],
+            targets=targets,
             steps=[StepSpec.from_dict(s) for s in d.get("steps") or []],
+            connection=conn,
             rollback_of=d.get("rollback_of"),
         )
 

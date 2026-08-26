@@ -260,8 +260,10 @@ CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
   "execution_id": 123,
   "code_ref": "v1.2.0",
   "params": {"svc": "order-soa"},
+  "connection": {"ssh_user": "ops", "ssh_key_ref": "prod-node-key",
+                 "become": false, "become_user": "root", "become_method": "sudo"},
   "targets": [{"resource_id": 1, "name": "web-1", "ip": "10.0.0.1",
-               "ssh_user": "ops", "ssh_key_ref": "prod-node-key"}],
+               "region": "cn-guangzhou", "model_code": "aliyun_ecs"}],
   "steps": [{"key": "restart_app", "type": "ansible",
              "playbook": "ansible/playbooks/app_restart.yml",
              "timeout_sec": 600, "serial": "30%", "batch_pause_sec": 60,
@@ -269,6 +271,8 @@ CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
   "rollback_of": null
 }
 ```
+
+凭据两级结构：消息级 `connection`（runbook 声明）打底，target 级同名字段非空可覆盖，runner 解析时合并；确需 sudo 密码时在 connection/target 带 `become_password_ref`（Vault 钥匙名）。契约校验失败（如缺 ssh_key_ref）runner 回流 `prepare` 失败事件而非静默丢弃。
 
 回滚下发 = `command: "rollback"`，runner 对已完成步骤逆序重跑（extra_vars 注入 `bingops_action=undo`）。
 
