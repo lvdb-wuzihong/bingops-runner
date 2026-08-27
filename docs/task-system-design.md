@@ -126,6 +126,7 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 - 回滚下发只包含**已完成且 rollbackable** 的步骤（控制面按 `job_steps` 状态过滤）；runner 无状态，不知道哪些步骤跑过，给什么跑什么
 - 零已完成步骤的失败（如 prepare 阶段失败）直接落终态，不进 `rolling_back`
 - 回滚下发后收到失败事件（含 runner 契约校验失败回流的 rollback attempt 事件）落 `rollback_failed`/`partial_rollback`，不得无限等待
+- **终态以 runner 的 `execution_finished` 事件为准**：每次 dispatch 处理结束 runner 必发该事件（do → success/failed；rollback → rolled_back/partial_rollback/rollback_failed），控制面收到即落 execution 终态，不得自行推断或无限等待
 
 ---
 

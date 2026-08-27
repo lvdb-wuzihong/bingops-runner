@@ -106,6 +106,13 @@ class JobWorker:
                 event_type="step_finished", seq=2,
                 status="failed", error=f"dispatch 契约校验失败: {error}",
             ))
+            self._producer.send_event(StepEvent(
+                message_id=str(uuid.uuid4()), execution_id=execution_id,
+                step_key="", attempt_type=attempt_type,
+                event_type="execution_finished", seq=3,
+                status="rollback_failed" if attempt_type == "rollback" else "failed",
+                error=f"dispatch 契约校验失败: {error}",
+            ))
             self._producer.flush()
         except Exception:
             logger.exception("契约失败事件回流失败 execution_id=%s", execution_id)
@@ -148,6 +155,9 @@ class JobWorker:
 
         is_rollback = msg.command == "rollback"
         attempt = "rollback" if is_rollback else "do"
+        # 悲观默认：任何未预期路径都落 failed/rollback_failed，不得静默
+        outcome = "rollback_failed" if is_rollback else "failed"
+        undo_done = 0
         try:
             # ---- 准备阶段：git clone pinned tag ----
             repo_dir = self._git.fetch(msg.code_ref, os.path.join(exec_dir, "repo"))
@@ -158,6 +168,7 @@ class JobWorker:
                 extra_vars = {**msg.params, "bingops_action": "undo"}
                 if not steps:
                     logger.warning("execution %s 无可回滚步骤", msg.execution_id)
+                    outcome = "rolled_back"  # 无需回滚 = 回滚链空转完成
                     return
             else:
                 steps = msg.steps
@@ -184,12 +195,19 @@ class JobWorker:
                         emit(step.key, attempt, "step_finished", status="failed",
                              exit_code=None, error=str(e))
                         logger.error("step %s 失败: %s", step.key, e)
-                        return  # 失败即停，后续步骤不再执行（控制面置 failed）
+                        outcome = ("partial_rollback" if undo_done else "rollback_failed") \
+                            if is_rollback else "failed"
+                        return  # 失败即停，后续步骤不再执行
                     emit(step.key, attempt, "step_finished",
                          status="success" if result.ok else "failed",
                          exit_code=result.rc, error=result.error)
                     if not result.ok:
+                        outcome = ("partial_rollback" if undo_done else "rollback_failed") \
+                            if is_rollback else "failed"
                         return
+                    if is_rollback:
+                        undo_done += 1
+                outcome = "rolled_back" if is_rollback else "success"
 
         except RunnerError as e:
             # 准备阶段失败（git/vault/inventory）：以 prepare 伪步骤告知控制面
@@ -198,6 +216,8 @@ class JobWorker:
             emit("prepare", attempt, "step_finished",
                  status="failed", error=str(e))
         finally:
+            # execution 级终态事件：控制面靠它落 rolling_back/running 的终态
+            emit("", attempt, "execution_finished", status=outcome)
             shutil.rmtree(exec_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
