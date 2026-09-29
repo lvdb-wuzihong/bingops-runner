@@ -48,37 +48,55 @@ class Target:
 
 @dataclass
 class StepSpec:
-    """步骤定义快照（随 dispatch 下发，执行期间不受 runbook 编辑影响）。"""
+    """唯一步骤定义快照（v29 扁平单步：一个 runbook = 一个步骤）。
+
+    entry 语义随 type 分叉：ansible=playbook 路径 / shell=命令字符串 /
+    python=仓库内脚本入口 / terraform=工作目录。run_on 缺省按 type 推断。
+    """
 
     key: str
     name: str
     type: str
-    playbook: str | None = None
+    run_on: str  # target | local
+    entry: str
     timeout_sec: int | None = None
     serial: str | None = None
     batch_pause_sec: int | None = None
-    rollbackable: bool = False
+    rollbackable: bool = True
+    undo_command: str | None = None  # 仅 shell
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "StepSpec":
+        step_type = d.get("type", "ansible")
+        # v29 统一为 entry；兼容在途旧消息的分叉字段名
+        entry = (d.get("entry") or d.get("playbook") or d.get("command")
+                 or d.get("script") or d.get("working_dir") or "")
         return cls(
-            key=d["key"],
-            name=d.get("name") or d["key"],
-            type=d.get("type", "ansible"),
-            playbook=d.get("playbook"),
+            key=d.get("key") or "main",
+            name=d.get("name") or d.get("key") or "main",
+            type=step_type,
+            run_on=d.get("run_on") or _DEFAULT_RUN_ON.get(step_type, "target"),
+            entry=entry,
             timeout_sec=d.get("timeout_sec"),
             serial=d.get("serial"),
             batch_pause_sec=d.get("batch_pause_sec"),
-            rollbackable=bool(d.get("rollbackable", False)),
+            rollbackable=bool(d.get("rollbackable", True)),
+            undo_command=d.get("undo_command"),
         )
+
+
+# exec_type → run_on 缺省（与控制面 EXEC_TYPE_RUN_ON 同表）
+_DEFAULT_RUN_ON = {"ansible": "target", "shell": "target",
+                   "python": "local", "terraform": "local"}
 
 
 @dataclass
 class DispatchMessage:
     """job-dispatch 消息；command=execute | rollback。
 
-    凭据/提权采用两级结构：消息级 connection（runbook 声明）为底，
-    target 级同名字段可覆盖；解析时在此合并，下游只看到最终值。
+    v29：steps 数组已废，改为单个 step 对象；secrets 为 {变量名: Vault路径#字段}，
+    只带钥匙名，明文由 runner 现场取。凭据两级结构：消息级 connection 打底，
+    target 级同名字段非空可覆盖。
     """
 
     message_id: str
@@ -87,7 +105,8 @@ class DispatchMessage:
     code_ref: str
     params: dict[str, Any]
     targets: list[Target]
-    steps: list[StepSpec]
+    step: StepSpec
+    secrets: dict[str, str] = field(default_factory=dict)
     connection: dict[str, Any] = field(default_factory=dict)
     rollback_of: int | None = None
 
@@ -100,6 +119,10 @@ class DispatchMessage:
             merged = {k: v for k, v in conn.items() if v is not None}
             merged.update({k: v for k, v in t.items() if v is not None})
             targets.append(Target.from_dict(merged))
+        # v29 单 step；兼容在途旧消息的 steps 数组（取首步）
+        step_dict = d.get("step") or (d.get("steps") or [None])[0]
+        if not step_dict:
+            raise KeyError("step")
         return cls(
             message_id=d["message_id"],
             command=d["command"],
@@ -107,7 +130,8 @@ class DispatchMessage:
             code_ref=d["code_ref"],
             params=d.get("params") or {},
             targets=targets,
-            steps=[StepSpec.from_dict(s) for s in d.get("steps") or []],
+            step=StepSpec.from_dict(step_dict),
+            secrets=d.get("secrets") or {},
             connection=conn,
             rollback_of=d.get("rollback_of"),
         )

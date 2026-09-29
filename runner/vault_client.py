@@ -63,27 +63,35 @@ class VaultClient:
         logger.info("Vault AppRole 登录成功，token 有效期 %ss", lease)
         return client
 
-    def get_secret(self, key_ref: str, ttl_sec: int = _DEFAULT_TTL_SEC) -> str:
-        """按钥匙名取钥（KV v2：secret/data/bingops/keys/<key_ref>，字段 value）。"""
-        cached = self._cache.get(key_ref)
+    def read_kv(self, path: str, field: str = "value",
+                ttl_sec: int = _DEFAULT_TTL_SEC) -> str:
+        """读 KV v2 任意路径的指定字段（v27 secrets 契约：path#field）。
+
+        缓存键含 path+field；取出的值由调用方负责注册进 redact。
+        """
+        cache_key = f"{path}#{field}"
+        cached = self._cache.get(cache_key)
         if cached and time.time() < cached[1]:
             return cached[0]
 
         client = self._ensure_login()
-        path = f"bingops/keys/{key_ref}"
         try:
             resp = client.secrets.kv.v2.read_secret_version(
                 path=path, mount_point=self._config.vault_kv_mount
             )
-            value = resp["data"]["data"].get("value")
+            value = resp["data"]["data"].get(field)
         except Exception as e:
-            raise VaultError(f"读取 secret 失败 [{key_ref}]: {_vault_error_detail(e)}") from e
+            raise VaultError(f"读取 secret 失败 [{cache_key}]: {_vault_error_detail(e)}") from e
         if not value:
-            raise VaultError(f"secret [{key_ref}] 缺少 value 字段")
+            raise VaultError(f"secret [{cache_key}] 缺少字段 {field}")
 
-        self._cache[key_ref] = (value, time.time() + ttl_sec)
-        logger.info("Vault 取钥成功: %s", key_ref)
+        self._cache[cache_key] = (value, time.time() + ttl_sec)
+        logger.info("Vault 取钥成功: %s", cache_key)
         return value
+
+    def get_secret(self, key_ref: str, ttl_sec: int = _DEFAULT_TTL_SEC) -> str:
+        """按钥匙名取目标机私钥等（存量约定：secret/<mount>/bingops/keys/<ref> 的 value 字段）。"""
+        return self.read_kv(f"bingops/keys/{key_ref}", "value", ttl_sec)
 
     def clear_cache(self) -> None:
         self._cache.clear()

@@ -20,25 +20,32 @@ bingops（控制面）── Kafka[job-dispatch] ──→ bingops-runner ──
 runner/
 ├── core/            # config / logging / exceptions / models（Kafka 契约 dataclass）
 ├── kafka/           # consumer(job-dispatch) + producer(job-events)
-├── vault_client.py  # AppRole 取钥，内存 TTL 缓存，不落盘
+├── vault_client.py  # AppRole 取钥，KV v2 任意 path#field，内存 TTL 缓存
 ├── git_fetcher.py   # git clone --depth 1 --branch <tag>（pinned，不可移动）
-├── inventory.py     # targets → inventory JSON + 临时 keyfile(0600, 用完即删)
+├── inventory.py     # targets → inventory JSON + 临时 keyfile(0600, 用完即删)；无 targets 不建
+├── secrets_resolver.py  # v27：secrets/存量 _ref 统一解析为 env，executor 前置
 ├── redact.py        # 出机前脱敏（Vault 取值进掩码列表）
-├── executors/
+├── executors/       # v27 注册表型：type → handler，统一 run(step, ctx)
+│   ├── registry.py           # ansible / shell / python / terraform(门控占位)
 │   ├── ansible_executor.py   # 事件回调 → job-events；灰度分批；超时强杀
-│   └── terraform_executor.py # P2 占位
-└── main.py          # 信号量限流 / message_id 去重 / 优雅退出
+│   ├── shell_executor.py     # target 复用 ansible ad-hoc；local 走 subprocess
+│   ├── python_executor.py    # subprocess + 镜像内置依赖
+│   └── terraform_executor.py # 门控未开，P2 点亮
+└── main.py          # 信号量限流 / message_id 去重 / 优雅退出 / 单步编排
 ```
 
-## 执行流程（单条 dispatch）
+## 执行流程（单条 dispatch，v29 扁平单步）
 
 1. message_id 去重 → 信号量获取并发位
-2. `git clone --depth 1 --branch <code_ref>` 取代码快照
-3. Vault AppRole 按 `ssh_key_ref` 现场取钥 → 写临时 keyfile(0600) → 拼 inventory
-4. 逐 step 执行 ansible playbook（`serial` 灰度分批 + `batch_pause_sec` 批间暂停）
-5. 事件流回流：`step_started → log(seq 递增) → step_finished`
-6. `command=rollback` 时：rollbackable 步骤**逆序**重跑，extra_vars 注入 `bingops_action=undo`
-7. 结束清理：keyfile 删除、工作目录清除
+2. exec_type 门禁：未知类型在 step_started 前回流 prepare 失败
+3. `git clone --depth 1 --branch <code_ref>` 取代码快照
+4. secrets 解析前置：`{VAR: "path#field"}` + 存量 `*_ref` params → 同名 env，进脱敏列表
+5. `run_on=target` 时 Vault 取钥 → 临时 keyfile(0600) → 拼 inventory；local/无 targets 不建
+6. 注册表分发 executor 执行单步（ansible 支持 serial 灰度 + batch_pause_sec）
+7. 事件流回流：`step_started → log(seq 递增) → step_finished → execution_finished`
+8. `command=rollback` 时：shell 优先 undo_command，其余注入 `BINGOPS_ACTION=undo`
+   （ansible 同时保留 extra_vars `bingops_action` 兼容存量 playbook）；不可逆步骤回滚空转
+9. 结束清理：keyfile 删除、工作目录清除
 
 ## 本地开发
 
