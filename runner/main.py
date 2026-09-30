@@ -4,8 +4,8 @@
 - message_id 去重（at-least-once 重放防护，进程内有界 LRU）
 - 信号量限流：单 runner 并发 execution 数 = RUNNER_MAX_CONCURRENT
 - 优雅退出：SIGTERM/SIGINT 停消费，等待在跑 execution 的当前 step 结束
-- 回滚：command=rollback 时对单步重跑 undo（shell 优先 undo_command，
-  其余注入 BINGOPS_ACTION=undo env + ansible extra_vars bingops_action）
+- 回滚：command=rollback 时重跑同一 entry 并注入 BINGOPS_ACTION=undo
+  （ansible 另有 extra_vars bingops_action；v30 已删 undo_command 约定）
 
 纪律：runner 不写业务表，只通过 job-events 回流；消息解析失败用
 step_key="prepare" 的失败事件告知控制面，运行期失败闭合在真实 step_key 上。
@@ -19,7 +19,6 @@ import signal
 import threading
 import uuid
 from collections import OrderedDict
-from dataclasses import replace
 from itertools import count
 
 from runner.core.config import Config
@@ -181,10 +180,9 @@ class JobWorker:
             emit("", attempt, "execution_finished", status="rolled_back")
             return
 
-        # ---- shell 回滚优先 undo_command ----
+        # ---- 回滚统一约定（v30）：重跑同一 entry + BINGOPS_ACTION=undo；
+        # 入口没实现 undo 分支就执行失败回流 rollback_failed（可见，不静默） ----
         run_step = step
-        if is_rollback and step.type == "shell" and step.undo_command:
-            run_step = replace(step, entry=step.undo_command)
 
         emit(step.key, attempt, "step_started")
         stack = contextlib.ExitStack()
@@ -216,6 +214,7 @@ class JobWorker:
                 event_cb=on_log(step.key, attempt),
                 redactor=redactor,
                 timeout_sec=run_step.timeout_sec or self._config.default_step_timeout_sec,
+                max_parallel_hosts=self._config.max_parallel_hosts,
             )
             result = executor.run(run_step, ctx)
             emit(step.key, attempt, "step_finished",

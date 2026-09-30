@@ -48,10 +48,12 @@ class Target:
 
 @dataclass
 class StepSpec:
-    """唯一步骤定义快照（v29 扁平单步：一个 runbook = 一个步骤）。
+    """唯一步骤定义快照（v29 扁平单步，v30 收敛为 5 字段）。
 
     entry 语义随 type 分叉：ansible=playbook 路径 / shell=命令字符串 /
     python=仓库内脚本入口 / terraform=工作目录。run_on 缺省按 type 推断。
+    v30 已删：serial/batch_pause_sec（并发度下沉 runner 配置 max_parallel_hosts）、
+    undo_command（回滚统一 BINGOPS_ACTION=undo 约定）。旧消息带这些键会被忽略。
     """
 
     key: str
@@ -60,10 +62,7 @@ class StepSpec:
     run_on: str  # target | local
     entry: str
     timeout_sec: int | None = None
-    serial: str | None = None
-    batch_pause_sec: int | None = None
     rollbackable: bool = True
-    undo_command: str | None = None  # 仅 shell
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "StepSpec":
@@ -78,10 +77,7 @@ class StepSpec:
             run_on=d.get("run_on") or _DEFAULT_RUN_ON.get(step_type, "target"),
             entry=entry,
             timeout_sec=d.get("timeout_sec"),
-            serial=d.get("serial"),
-            batch_pause_sec=d.get("batch_pause_sec"),
             rollbackable=bool(d.get("rollbackable", True)),
-            undo_command=d.get("undo_command"),
         )
 
 

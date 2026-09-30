@@ -4,7 +4,8 @@
   不自研 paramiko——直接复用 inventory / Vault keyfile / become 与日志格式，零新增 SSH 代码
 - run_on=local：subprocess，cwd=仓库根
 
-回滚：shell 有 undo_command 时 main 已把 entry 替换为它；否则靠 BINGOPS_ACTION=undo env。
+回滚（v30 统一约定）：重跑同一 entry 并注入 BINGOPS_ACTION=undo env；
+内联命令（df -h 这种）天然没有 undo，应把 rollbackable 关成 false。
 """
 
 import logging

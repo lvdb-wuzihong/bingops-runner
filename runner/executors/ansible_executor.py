@@ -1,9 +1,7 @@
-"""ansible-runner 执行器：结构化事件回调 → 日志行，支持灰度批次与超时强杀。
+"""ansible-runner 执行器：结构化事件回调 → 日志行，支持多目标分批与超时强杀。
 
-灰度（设计文档决策 8）：
-- serial: "N"（绝对批大小）或 "30%"（百分比），目标列表按批切分依次执行
-- batch_pause_sec: 批间暂停，给观测留窗口
-- 任一批失败即终止后续批次
+多目标并发度（v30）：不再由任务声明 serial/batch_pause_sec，而是读 runner
+部署级配置 max_parallel_hosts（0=一次全部，1=逐台）；任一批失败即终止后续批次。
 
 超时：ansible-runner cancel_callback 周期轮询，到点返回 True 强杀。
 describe_event / log_artifact_tail 为模块级函数，shell 远端执行复用。
@@ -12,7 +10,6 @@ describe_event / log_artifact_tail 为模块级函数，shell 远端执行复用
 import json
 import glob
 import logging
-import math
 import os
 import time
 from typing import Any
@@ -76,19 +73,14 @@ def log_artifact_tail(batch_dir: str, lines: int = 60) -> str:
     return snippet
 
 
-def split_batches(inventory_path: str, serial: str | None) -> list[list[str]]:
+def split_batches(inventory_path: str, max_parallel_hosts: int) -> list[list[str]]:
+    """按部署级并发度切批（v30）；<=0 表示一次全部，1 即逐台执行。"""
     with open(inventory_path, encoding="utf-8") as f:
         hosts = list(json.load(f)["all"]["hosts"].keys())
-    if not serial:
+    if max_parallel_hosts <= 0 or max_parallel_hosts >= len(hosts):
         return [hosts]
-
-    serial = serial.strip()
-    if serial.endswith("%"):
-        pct = float(serial[:-1]) / 100.0
-        size = max(1, math.ceil(len(hosts) * pct))
-    else:
-        size = int(serial)
-    return [hosts[i:i + size] for i in range(0, len(hosts), size)]
+    return [hosts[i:i + max_parallel_hosts]
+            for i in range(0, len(hosts), max_parallel_hosts)]
 
 
 def subset_inventory(inventory_path: str, hosts: list[str], dest: str) -> str:
@@ -164,17 +156,13 @@ class AnsibleExecutor:
         # do/undo 契约：存量 playbook 读 extra_vars.bingops_action
         extra_vars = {**ctx.params, "bingops_action": ctx.action}
 
-        batches = split_batches(ctx.inventory["inventory_path"], step.serial)
-        if step.serial:
+        batches = split_batches(ctx.inventory["inventory_path"], ctx.max_parallel_hosts)
+        if len(batches) > 1:
             ctx.event_cb("info", None,
-                         f"灰度模式: serial={step.serial}，共 {len(batches)} 批")
+                         f"多目标并发度 max_parallel_hosts={ctx.max_parallel_hosts}，"
+                         f"共 {len(batches)} 批")
 
-        for idx, batch in enumerate(batches):
-            if idx > 0 and step.batch_pause_sec:
-                ctx.event_cb("info", None,
-                             f"批间暂停 {step.batch_pause_sec}s...")
-                time.sleep(step.batch_pause_sec)
-
+        for batch in batches:
             result = self._run_batch(
                 step=step, playbook=playbook, hosts=batch,
                 inventory_path=ctx.inventory["inventory_path"],

@@ -27,7 +27,7 @@ runner/
 ├── redact.py        # 出机前脱敏（Vault 取值进掩码列表）
 ├── executors/       # v27 注册表型：type → handler，统一 run(step, ctx)
 │   ├── registry.py           # ansible / shell / python / terraform(门控占位)
-│   ├── ansible_executor.py   # 事件回调 → job-events；灰度分批；超时强杀
+│   ├── ansible_executor.py   # 事件回调 → job-events；多目标分批；超时强杀
 │   ├── shell_executor.py     # target 复用 ansible ad-hoc；local 走 subprocess
 │   ├── python_executor.py    # subprocess + 镜像内置依赖
 │   └── terraform_executor.py # 门控未开，P2 点亮
@@ -41,10 +41,11 @@ runner/
 3. `git clone --depth 1 --branch <code_ref>` 取代码快照
 4. secrets 解析前置：`{VAR: "path#field"}` + 存量 `*_ref` params → 同名 env，进脱敏列表
 5. `run_on=target` 时 Vault 取钥 → 临时 keyfile(0600) → 拼 inventory；local/无 targets 不建
-6. 注册表分发 executor 执行单步（ansible 支持 serial 灰度 + batch_pause_sec）
+6. 注册表分发 executor 执行单步（多目标并发度 = 部署级 `RUNNER_MAX_PARALLEL_HOSTS`，v30）
 7. 事件流回流：`step_started → log(seq 递增) → step_finished → execution_finished`
-8. `command=rollback` 时：shell 优先 undo_command，其余注入 `BINGOPS_ACTION=undo`
-   （ansible 同时保留 extra_vars `bingops_action` 兼容存量 playbook）；不可逆步骤回滚空转
+8. `command=rollback` 时：重跑同一 entry 并注入 `BINGOPS_ACTION=undo`
+   （ansible 同时保留 extra_vars `bingops_action` 兼容存量 playbook；v30 已删 undo_command）；
+   不可逆步骤回滚空转
 9. 结束清理：keyfile 删除、工作目录清除
 
 ## 本地开发

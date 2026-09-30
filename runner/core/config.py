@@ -79,6 +79,7 @@ class Config:
 
     # ---- 运行时 ----
     max_concurrent_executions: int
+    max_parallel_hosts: int    # v30：多目标并发度（部署级）；0=一次全部，1=逐台
     workdir: str
     default_step_timeout_sec: int
     log_level: str
@@ -99,6 +100,7 @@ class Config:
             git_username=os.environ.get("GIT_USERNAME"),
             git_token=os.environ.get("GIT_TOKEN"),
             max_concurrent_executions=_env_int("RUNNER_MAX_CONCURRENT", 4),
+            max_parallel_hosts=_env_int("RUNNER_MAX_PARALLEL_HOSTS", 0),
             workdir=os.environ.get("RUNNER_WORKDIR", "/var/lib/bingops-runner"),
             default_step_timeout_sec=_env_int("RUNNER_STEP_TIMEOUT_SEC", 600),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),

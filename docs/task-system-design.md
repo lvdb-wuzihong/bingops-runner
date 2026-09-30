@@ -16,12 +16,13 @@
 | 5 | Secret 管理 | HashiCorp Vault 唯一存放；下发消息只带钥匙名；runner AppRole 现场取钥 |
 | 6 | Terraform state | **不存 Vault**（KB 级 secret 库 vs MB 级高频 blob，性质不同）；P2 用 bingops 实现 http backend + OSS blob |
 | 7 | 日志脱敏 | runner 出机前 redact（Vault 取值加入掩码列表） |
-| 8 | 灰度 | step 级 `serial`（1 / 30%）+ `batch_pause_sec` 批间暂停；**v26 冻结：契约与列保留，UI 不出现**（当前均为单操作机） |
+| 8 | 灰度 | ~~step 级 `serial` + `batch_pause_sec`~~ **v30 已删除**：多目标并发度是**执行机的部署级配置**（runner `max_parallel_hosts`），不是每个任务的属性。单目标场景下这两个字段永远用不上，却占着表单两格 |
 | 9 | **作者面简化**（v26） | 糖在 API 入口、归一在 service、**存储与 dispatch 契约零改动**；只减必填性与 UI 暴露面，**不删 DB 列与消息字段**（真删会伤runner 已实现的分步逻辑与历史行）；硬校验一条不放松 |
 | 10 | **多执行器引擎**（v27） | 任务模块不是“ansible 引擎”而是**步骤编排引擎**：executor 注册表按 `exec_type` 分发，本轮落地 shell / python / ansible，terraform 只注册类型占位。**注：执行器抽象未变，但 v29 已把消息里的 steps 数组改为 step 对象（见 #13），runner 需同步重构** |
 | 11 | **执行位置与目标解耦**（v27） | `run_on: target \| local`（v29 起是 runbook 的步骤列，缺省按 `exec_type` 推断）；**targets 与 `connection.ssh_key_ref` 的必填性均由它派生**——这是无主机 API 任务的根因 |
 | 12 | **凭据三层分离**（v27） | `params_schema`（明文）/ `secrets_schema`（需走 Vault 的入参，只存钥匙名）/ `connection.ssh_key_ref`（目标机私钥）各自一个字段；不再靠 `*_ref` 后缀做隐式魔法（后缀约定降级为兼容路径，新建不用） |
-| 13 | **扁平单步引擎**（v28→v29） | **一个 runbook = 一个步骤**，且 `steps` 概念彻底消失：API 入参、`runbooks.steps` 列、`job_executions.steps_snapshot`、dispatch 的 steps 数组全部删除，改为 8 个步骤列 + 单个 `step_snapshot` 对象 + 消息里的 `step` 对象。**属破坏性变更，runner 需按本文档同步重构**。你们仓库已证明该形态正确：整条流程写在一个 playbook 里，role 才是复杂度容身处 |
+| 13 | **扁平单步引擎**（v28→v29） | **一个 runbook = 一个步骤**，且 `steps` 概念彻底消失：API 入参、`runbooks.steps` 列、`job_executions.steps_snapshot`、dispatch 的 steps 数组全部删除，改为步骤列 + 单个 `step_snapshot` 对象 + 消息里的 `step` 对象。**属破坏性变更，runner 需按本文档同步重构**。你们仓库已证明该形态正确：整条流程写在一个 playbook 里，role 才是复杂度容身处 |
+| 14 | **字段按“该问谁”分类**（v30） | 任务属性（跑什么/在哪跑）才进表单；基础设施属性（登录凭据/超时/版本/并发度）配一次即可；记账属性（key/name/run_on）全由后端生成。据此删掉 `undo_command`（回滚统一走 `BINGOPS_ACTION=undo` 约定）与 `serial`/`batch_pause_sec`（并发度下沉到 runner 配置）——**三个都是“每次都不填但每次都看得到”的噪声字段** |
 
 ---
 
@@ -111,7 +112,7 @@ secrets_schema:
 
 | 你写的 | 落到哪里 |
 |--------|---------|
-| `exec_type` / `entry` / `run_on` / `timeout_sec` / `rollbackable` / `undo_command` / `serial` / `batch_pause_sec` | **runbooks 的 8 个步骤列**（v29：不再有序列化的 steps 数组，无需拼 JSON） |
+| `exec_type` / `entry` / `run_on` / `timeout_sec` / `rollbackable` | **runbooks 的 5 个步骤列**（v29 扁平化；v30 又删掉 `undo_command`/`serial`/`batch_pause_sec`）——**无数组、无 JSON 可拼** |
 | `ssh_user` / `ssh_key_ref` / `become*` | 并入 `connection` JSONB（与显式 `connection` 共存时，平铺字段覆盖同名键） |
 | 缺省 `run_on` | 按 `exec_type` 推断后**显式落列**（下游不再各自推断） |
 | 缺省 `timeout_sec` / `rollbackable` | 600 / **true**（不可逆是例外，需显式 false） |
@@ -126,7 +127,9 @@ secrets_schema:
 - 继承来的目标**照走全部硬校验**（`status=running`、`target_models` 白名单、并发目标锁）——简化的是填写量，不是安全边界
 - 报错即文档：不满足步骤契约时，400 message 内嵌最小可用示例（`MINIMAL_RUNBOOK_HINT`）
 
-**步骤属性的坑**：`rollbackable` 缺省 **true**——旧契约默认 false 会让所有人漏填，导致回滚链静默跳步；不可逆任务必须显式写 false。`undo_command` 仅 `exec_type=shell` 可用（其余类型带它会 400，因为它们的逆操作走同一入口的 `BINGOPS_ACTION=undo` 分支）。
+**回滚只有一个约定**：入口（脚本 / playbook）自己实现 undo 分支，平台回滚时就是**重跑同一 `entry` 并注入 `BINGOPS_ACTION=undo`**。因此 `rollbackable` 的含义很单纯：“这个入口有没有 undo 分支”。缺省 **true**（旧契约默认 false 会让所有人漏填，导致回滚链静默跳步）；不可逆任务显式关成 false。
+
+内联命令（`df -h` 这种）天然没有 undo，那种任务请把“允许回滚”关掉——v30 不再提供 `undo_command` 字段去写第二套逆操作表达：同一件事有两种写法，就必然出现两种写法不一致的风险。
 
 **多步编排已彻底移除**（v29）：你们自己的仓库已证明正确形态——整条流程写在一个 playbook 里（厚 role、薄 runbook），steps 数组没有真实使用场景。删除范围 = API 入参 + `runbooks.steps` 列 + `job_executions.steps_snapshot` + dispatch 消息的 `steps` 数组；**`job_steps` 表保留**（一步一行，回滚是同 key 的 `attempt_type='rollback'` 行，日志与审计结构不变）。将来真要恢复多步，是“加一张步骤表”级别的演进，不是回到 JSON 数组。`proxy_hop` / `become_user` 等高级字段仍可通过 `connection` 字典表达。
 
@@ -206,7 +209,7 @@ steps:
 ```
 
 **字段速查**：
-- `serial` / `batch_pause_sec`：多目标批量操作用（如 30 台机器按 30% 分批重启），本 demo 单操作机用不上
+- ~~`serial` / `batch_pause_sec`~~：v30 已删除（多目标并发度改为 runner 部署级配置）
 - `_ref` 后缀参数 → runner 注入 env：`src_db_password_ref` 剥后缀转大写 = `SRC_DB_PASSWORD`
 - `proxy_hop` 渲染细节与坑（ProxyCommand 显式 `-i`）见 §5
 - 敏感值双保险：task `no_log: true` + runner redact 兜底
@@ -229,7 +232,7 @@ steps:
 - **存储与 API 契约仅 JSON**（params_schema/secrets_schema/connection/步骤列为 JSONB/标量，API 收 dict）；后端不解析 YAML，单一文法、单一校验入口（`_build_step`）
 - **前端编辑面用 YAML**（Monaco + js-yaml@4，YAML 1.2 core schema，避 1.1 `yes/on` 布尔坑）：提交时 `yaml.load` → 校验 → JSON 调现有 API；编辑回显 `yaml.dump`（保插入序，往返无 diff 噪音）
 - 标量配置（name/category/risk_level/auto_rollback/target_models）用**结构化表单**；connection 是 runbook 定义的一部分（见 §3.1 示例），UI 以 5 个已知键的结构化表单编辑、序列化进 connection 字段，不进 YAML 自由区
-- **v29：单步 runbook 只填 `exec_type` + `entry`**（见 §3.1）——两个必填项，无互斥字段、无数组；`connection` 嵌套全键与 `serial`/`batch_pause_sec` 等高级字段在 service 入口归一，**后端不存两套语法**，编辑回显直接读步骤列与 connection
+- **v29：单步 runbook 只填 `exec_type` + `entry`**（见 §3.1）——两个必填项，无互斥字段、无数组；`connection` 嵌套全键等高级字段在 service 入口归一，**后端不存两套语法**，编辑回显直接读步骤列与 connection
 - YAML 校验仅为 UX 即时反馈；权威仍是后端 400
 - 与未来 GitLab runbook-as-code 演进同构：仓库与 UI 共用 YAML 语法，CI 转 JSON 同步进平台
 - **CI 门禁（P2）**：标 `rollbackable: true` 的 role 必须引用 `bingops_action`，防只写 do 忘写 undo
@@ -247,11 +250,13 @@ steps:
 | exec_type | entry 语义 | `run_on` 缺省 | 需要 targets | 参数注入 | 回滚入口 |
 |-----------|-----------|--------------|-------------|---------|---------|
 | `ansible` | playbook 路径 | `target` | 是 | extra_vars(params) + env(secrets) | 同 playbook + `BINGOPS_ACTION=undo` |
-| `shell` | **命令字符串**（仓库脚本写 `bash scripts/x.sh`） | `target`（可写 `local`） | `run_on=target` 时是 | env（params+secrets） | `undo_command` 优先，否则 `BINGOPS_ACTION=undo` |
+| `shell` | **命令字符串**（仓库脚本写 `bash scripts/x.sh`） | `target`（可写 `local`） | `run_on=target` 时是 | env（params+secrets） | `BINGOPS_ACTION=undo`（内联命令无 undo，应关 `rollbackable`） |
 | `python` | 仓库内脚本入口 | `local` | 否 | env + argv | 同脚本 undo 分支 |
 | `terraform` | 工作目录 | `local` | 否 | `-var` / tfvars | **本轮拒绝创建/执行**（门控未开，state 方案未定） |
 
-其余步骤列：`timeout_sec`（600）、`rollbackable`（true）、`serial`、`batch_pause_sec`、`undo_command`（仅 shell）。`_build_step` 把推断后的 `run_on` **显式落列**，下游不再各自推断。shell 语义已收敛为“entry 恒为命令”，避开“这是路径还是命令”的隐式判断（与你们否掉 `*_ref` 后缀魔法是同一条纪律）。
+其余步骤列：`timeout_sec`（600）、`rollbackable`（true）。`_build_step` 把推断后的 `run_on` **显式落列**，下游不再各自推断。shell 语义已收敛为“entry 恒为命令”，避开“这是路径还是命令”的隐式判断（与你们否掉 `*_ref` 后缀魔法是同一条纪律）。
+
+**v30 删掉的三个字段**（均为基础设施/噪声属性，不再由任务持有）：`undo_command`（回滚统一走 undo 约定）、`serial` 与 `batch_pause_sec`（多目标并发度 = runner 部署级配置 `max_parallel_hosts`）。
 
 **派生与门控**：
 
@@ -346,7 +351,7 @@ step:      pending → running → success / failed / skipped / rolled_back / ro
 
 | 期 | 内容 | 验收 |
 |----|------|------|
-| P1 | runner 骨架 + Vault + ansible 步骤 + 日志 live tail + 灰度 + 手动回滚 + git clone | 「批量重启」runbook 端到端：圈选→执行→灰度→日志→失败手动回滚→change_log |
+| P1 | runner 骨架 + Vault + ansible 步骤 + 日志 live tail + 手动回滚 + git clone（~~灰度~~ v30 下沉为 runner 配置） | 「批量重启」runbook 端到端：圈选→执行→日志→失败手动回滚→change_log |
 | **P1.5（v27）** | 多执行器引擎：executor 注册表 + shell/python + 凭据三层分离 + targets/run_on 可选（terraform 仅占位） | 「开通 RAM 子账号」python 无目标任务端到端：只填 params+secrets → 执行 → 看日志 → 手动回滚 |
 | P2 | terraform executor + http backend state（版本化=原生快照回滚）+ 自动回滚链 + OSS 制品层 + lint 门禁 | 「创建 RDS」失败自动逆序回滚；state 版本可追溯 |
 | P3 | 工单审批 + 封禁窗口 + 环境维度提级 + 漂移检测（state vs cloud-syncer 对账） | 高危无审批不可执行 |
@@ -374,9 +379,7 @@ CREATE TABLE runbooks (
     run_on           VARCHAR(16)  NOT NULL DEFAULT 'target',   -- target=SSH 目标机 | local=runner 本机
     timeout_sec      INT          NOT NULL DEFAULT 600,
     rollbackable     BOOLEAN      NOT NULL DEFAULT TRUE,       -- 不可逆任务显式 false
-    undo_command     TEXT,                                     -- 仅 exec_type=shell
-    serial           VARCHAR(16),                              -- 多目标灰度批次（1 / 30%）
-    batch_pause_sec  INT          NOT NULL DEFAULT 0,
+    -- v30 已删除 undo_command / serial / batch_pause_sec（回滚统一约定 + 并发度下沉 runner）
     connection    JSONB        NOT NULL DEFAULT '{}',   -- {ssh_user, ssh_key_ref, become, become_method, become_user}
     target_models JSONB        NOT NULL DEFAULT '["aliyun_ecs", "gcp_compute"]',
     default_target_resource_ids JSONB NOT NULL DEFAULT '[]',  -- 执行未传 target 时继承（v26）
@@ -469,8 +472,7 @@ CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
                "region": "cn-guangzhou", "model_code": "aliyun_ecs"}],
   "step": {"key": "main", "name": "批量重启服务", "type": "ansible", "run_on": "target",
            "entry": "ansible/playbooks/app_restart.yml",
-           "timeout_sec": 600, "serial": "30%", "batch_pause_sec": 60,
-           "rollbackable": true}
+           "timeout_sec": 600, "rollbackable": true}
 }
 ```
 
@@ -492,9 +494,9 @@ CREATE INDEX idx_job_log_step ON job_step_logs (step_id, seq);
 }
 ```
 
-**消息形态变更（v29，破坏性）**：`steps` 数组 → `step` 单对象；字段名 `playbook`/`command`/`script`/`working_dir` 统一为 `entry`（语义由 `type` 决定），新增 `run_on`；step 内不再有 `args`/`playbook` 等分叉字段；`command=rollback` 时控制面把 `step_snapshot` 原样重发并约定注入 `BINGOPS_ACTION=undo`（shell 有 `undo_command` 则改用它）。`execution_id` 仍是双方唯一关联键，事件流（job-events）结构完全不变。
+**消息形态变更（v29，破坏性）**：`steps` 数组 → `step` 单对象；字段名 `playbook`/`command`/`script`/`working_dir` 统一为 `entry`（语义由 `type` 决定），新增 `run_on`；step 内不再有 `args`/`playbook`/`serial`/`undo_command` 等分叉字段；`command=rollback` 时控制面把 `step_snapshot` 原样重发并约定注入 `BINGOPS_ACTION=undo`。`execution_id` 仍是双方唯一关联键，事件流（job-events）结构完全不变。
 
-回滚下发 = `command: "rollback"`，runner 对已完成步骤逆序重跑（extra_vars 注入 `bingops_action=undo`）。
+回滚下发 = `command: "rollback"`，控制面把快照步骤原样重发，runner 注入 `BINGOPS_ACTION=undo` 重跑同一入口（v29 单步模型下不存在“逆序多步”）。
 
 **job-events**（runner → bingops）：
 
@@ -539,9 +541,10 @@ bingops-runner/
 3. **StepContext 统一注入**：`params`（extra_vars / env）、`secrets`（已解析）、`targets`、`connection`、`workdir`（仓库 clone 根）、`event emitter`、`redact 列表`
 4. **secrets 解析前置**到 executor 之前，一个解析器四种 type 共用；Vault 读失败 → step 失败并回流，不允许空值继续跑
 5. **shell 远端执行复用 ansible ad-hoc**（`ansible -i inv -m shell -a "<entry>"`），**不用 paramiko 自研**：直接复用已实现的 inventory / Vault keyfile / become / proxy_hop 与日志格式，零新增 SSH 代码；`run_on: local` 走 `subprocess`
+   - **v30：多目标并发度改由 runner 自己的配置 `max_parallel_hosts` 决定**（部署级），消息里不再下发 `serial` / `batch_pause_sec`；需要“逐台执行”就是把该配置调成 1
 6. **python**：`subprocess`，cwd=仓库根，env 含 params+secrets+`BINGOPS_ACTION`，stdout/stderr 逐行 → log 事件，退出码 → step 状态；依赖策略 = 镜像内置 `requirements.txt`（加 SDK 即重建镜像），每任务临时 venv 作退路
 7. **inventory 构建条件化**：`targets` 为空或 `run_on=local` 时不建 inventory、不取 SSH 私钥
-8. **回滚**：`command=rollback` 时，shell 有 `undo_command` 用之，其余统一注入 `BINGOPS_ACTION=undo`（与现有 ansible `bingops_action` extra_var 同一命名体系）；step_key 恒为 `main`，回滚行靠 `attempt_type=rollback` 区分
+8. **回滚（v30 收敛为单一约定）**：`command=rollback` 时**统一注入 `BINGOPS_ACTION=undo`** 重跑同一 `entry`（与现有 ansible `bingops_action` extra_var 同一命名体系）；**`undo_command` 字段已删除**，入口没实现 undo 分支就执行失败并回流 `rollback_failed`（可见，不会静默）。step_key 恒为 `main`，回滚行靠 `attempt_type=rollback` 区分
 
 ### 9.4 API 端点（bingops，P1）
 
@@ -555,7 +558,7 @@ bingops-runner/
 |------|------|-----------|
 | 新增/编辑 Runbook | **`exec_type` 下拉（ansible / shell / python）+ `entry` 单输入框** = 两个必填项（v29 已无四个互斥入口字段）；只留 5~7 个框：名称、执行方式、入口、ssh_user、ssh_key_ref、默认目标机（+ 参数区） | 四个互斥入口字段平铺 = 作者要先想清楚该填哪个 |
 | 参数区 | `params_schema` + `secrets_schema` 合成**一张表**：每行「名字 / 类型 / 必填 / 默认 / 是否密钥」，勾选即拆进 `secrets_schema`。**两个 JSON 文本框归零，存储仍是三层分离** | 手写 JSON 正是“两小时写不出一个 runbook”的直接原因 |
-| 步骤字段 | `timeout_sec` / `rollbackable`（默认 true）/ `undo_command`（仅 shell 显示）/ `serial` / `batch_pause_sec` 是**普通可选字段**（标量，不再是数组）；**`steps` 已从 API 删除，继续提交会被忽略** | 继续渲染 steps 编辑器 → 作者改了没生效 |
+| 步骤字段 | 只剩 `timeout_sec` 与 `rollbackable` 两个可选字段（**v30 已删 `undo_command` / `serial` / `batch_pause_sec`**，继续提交会被忽略）；`steps` 同样已不存在 | 表单里留着永远不填的字段 = 每次都要重新理解一遍它是什么意思 |
 | 编辑回显 | 直读 runbook 响应的**步骤列**（`exec_type`/`entry`/`run_on`/`timeout_sec`/`rollbackable`…，v29 已无 steps 数组；`run_on` 已显式回写） | 自己再推一遍缺省值，与后端推断不一致 |
 | 新增执行 | `target_resource_ids` 与 `code_ref` **去掉必填限制**：runbook 响应已带 `default_target_resource_ids`/`default_code_ref`，非空则预填可留空；无目标任务（entry 型）不渲染机器选择器 | 卡住提交，或强迫用户每次背 CMDB 数 ID 与 git tag |
 | 执行详情 | `rollback_policy` 恒 manual，自动回滚开关从 UI 移除；`auto_rollback` **已从响应体删除**，前端任何引用都是 undefined | 用户勾了“失败自动回滚”以为已生效（实际始终手动） |
@@ -572,8 +575,8 @@ bingops-runner/
 | 无 env 时的 fail-safe 方向 | 从严（视为 production，多审批）还是从宽（低危放行）；建议从严 | P3 |
 | **`target_models` 目标范围模型优化**（你定下轮再琢磨） | 现状是“模型 code 白名单”一维硬校；方向参照已有案例——**CMDB 输出 Prometheus HTTP SD 时 `http_config` 的做法**：目标集 + 如何访问（凭据引用/参数）一起结块描述，而不是拆成 `target_models` + `connection` + `secrets_schema` 三处。候选方案：目标选择器（selector：模型/标签/env/状态）+ 访问配置块绑定；本期不动契约 | P2 |
 | GitLab 自建与否 | 决定 P2 terraform state 是否可先用 GitLab 原生 backend 过渡 | P2 |
-| v26 冻结项解冻条件 | `serial`/`batch_pause_sec`：已改为 runbook 步骤列（v29保留，多机灰度仍可达）；`proxy_hop`：首次跨 VPC 目标时。~~`auto_rollback`~~：已删除，自动回滚解冻时重建在 execution 层 | P2 |
+| v26~v30 冻结项解冻条件 | `proxy_hop`：首次跨 VPC 目标时（走 `connection` 字典，不占表单）。~~`serial`/`batch_pause_sec`~~：v30 已删除，多目标并发度归 runner 配置；~~`auto_rollback`~~：v28 已删除，自动回滚解冻时重建在 execution 层 | P2 |
 | 仍排除在本轮之外（防边重构边膨胀） | GitLab 仓库同步器、playbook-tree/tag 预检 API、自动回滚解冻、terraform apply 与 state、**多步编排**（v29 已从 API/表结构/消息三层全删；恢复 = 新增一张步骤表的演进） | P2 |
 | ~~`type: python` 与 `exec_mode: local`~~（v27 已落地） | python executor 已实现（步骤级 `run_on=local`）；不再需要独立的 `exec_mode` 字段——执行位置属于步骤属性而非 runbook 属性 | 已结案 |
-| ⚠ **runner 必须按 v29 新消息形态重构** | dispatch 的 `steps` 数组已改为 `step` 单对象、入口字段统一为 `entry`、新增 `run_on`/`secrets`。已部署 runner 不升级则**所有新任务不可执行**（无法解析 `step`）；旧 ansible 任务回滚不受影响（历史 execution 自带 step_snapshot）。部 bingops 前先把 runner 跟齐，期间可用 `BINGOPS_JOB_STEP_TYPES=ansible` 只允许已验证类型 | v29 上线 |
+| ⚠ **runner 必须按 v29/v30 新消息形态重构** | dispatch 的 `steps` 数组已改为 `step` 单对象、入口字段统一为 `entry`、新增 `run_on`/`secrets`；**v30 又去掉了 step 里的 `serial`/`batch_pause_sec`/`undo_command`**，多目标并发度改读 runner 自己的 `max_parallel_hosts`。已部署 runner 不升级则**所有新任务不可执行**（无法解析 `step`）；旧 ansible 任务回滚不受影响（历史 execution 自带 step_snapshot，多余键被忽略）。部 bingops 前先把 runner 跟齐，期间可用 `BINGOPS_JOB_STEP_TYPES=ansible` 只允许已验证类型 | v29/v30 上线 |
 | terraform executor 的 state 后端 | 本轮只注册 type 占位；启动时再定 local / http backend+OSS（先前分析已倾向 bingops 自实现 http backend，锁为协议原生） | P2 |

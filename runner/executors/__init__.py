@@ -40,6 +40,7 @@ class StepContext:
     event_cb: EventCallback
     redactor: Redactor
     timeout_sec: int
+    max_parallel_hosts: int = 0   # v30：多目标并发度（部署级配置）；0=一次全部，1=逐台
 
     def subprocess_env(self, include_params: bool) -> dict[str, str]:
         """本地子进程环境：secrets 恒注入，params 按类型选，BINGOPS_ACTION 恒注入。"""
