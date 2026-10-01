@@ -89,6 +89,21 @@ class VaultClient:
         logger.info("Vault 取钥成功: %s", cache_key)
         return value
 
+    def read_ref(self, ref: str, ttl_sec: int = _DEFAULT_TTL_SEC) -> str:
+        """凭据引用解析（v31/v32）：三种形态统一入口。
+
+        - "path#field"：显式路径+字段
+        - 含 "/" 的路径（如 ssh/keys/ops-vpc-a）：直接当 KV 路径，字段缺省 value
+        - 裸钥匙名（存量约定）：补 bingops/keys/ 前缀
+        """
+        if "#" in ref:
+            path, field = ref.rsplit("#", 1)
+        elif "/" in ref:
+            path, field = ref, "value"
+        else:
+            path, field = f"bingops/keys/{ref}", "value"
+        return self.read_kv(path, field, ttl_sec)
+
     def get_secret(self, key_ref: str, ttl_sec: int = _DEFAULT_TTL_SEC) -> str:
         """按钥匙名取目标机私钥等（存量约定：secret/<mount>/bingops/keys/<ref> 的 value 字段）。"""
         return self.read_kv(f"bingops/keys/{key_ref}", "value", ttl_sec)

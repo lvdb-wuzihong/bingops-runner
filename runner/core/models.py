@@ -28,21 +28,22 @@ class Target:
     become_user: str | None = None
     become_method: str | None = None
     become_password_ref: str | None = None
+    gateway: dict[str, Any] | None = None  # v32 中转网关 {name,host,port,ssh_user,ssh_key_ref}；None=直连
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Target":
-        if not d.get("ssh_key_ref"):
-            raise KeyError("ssh_key_ref")
+        # v31：凭据归机器；ssh_key_ref 两级都缺时由 main 在 step_started 前回流 prepare 失败
         return cls(
             resource_id=int(d["resource_id"]),
             name=d["name"],
             ip=d["ip"],
             ssh_user=d.get("ssh_user", "ops"),
-            ssh_key_ref=d["ssh_key_ref"],
+            ssh_key_ref=d.get("ssh_key_ref", ""),
             become=bool(d.get("become", False)),
             become_user=d.get("become_user"),
             become_method=d.get("become_method"),
             become_password_ref=d.get("become_password_ref"),
+            gateway=d.get("gateway") or None,
         )
 
 

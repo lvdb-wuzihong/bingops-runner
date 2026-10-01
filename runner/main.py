@@ -163,11 +163,20 @@ class JobWorker:
         outcome = "rollback_failed" if is_rollback else "failed"
         step = msg.step
 
-        # ---- exec_type 门禁：未知类型在 step_started 之前回流 prepare 失败 ----
+        # ---- 门禁区：都在 step_started 之前回流 prepare 失败 ----
+        # 1) exec_type 未知；2) run_on=target 但 targets 空/凭据两级均缺（v31，bingops 已前置 400，runner 兑底）
         try:
             executor = get_executor(step)
+            if step.run_on == "target":
+                if not msg.targets:
+                    raise InventoryError("run_on=target 但 targets 为空")
+                missing = [t.name for t in msg.targets if not t.ssh_key_ref]
+                if missing:
+                    raise InventoryError(
+                        "以下目标无可用凭据（主机标签与 connection 兜底均未命中）："
+                        + ", ".join(missing))
         except RunnerError as e:
-            logger.error("execution %s exec_type 门禁失败: %s", msg.execution_id, e)
+            logger.error("execution %s 门禁失败: %s", msg.execution_id, e)
             emit("prepare", attempt, "step_started")
             emit("prepare", attempt, "step_finished", status="failed", error=str(e))
             emit("", attempt, "execution_finished", status=outcome, error=str(e))
@@ -194,11 +203,10 @@ class JobWorker:
             params, secrets_env = self._resolver.resolve(
                 msg.secrets, msg.params, redactor)
 
-            # ---- inventory 条件化：run_on=local 或无 targets 不建不取钥 ----
+            # ---- inventory 条件化：run_on=local 或无 targets 不建不取钥；
+            # 凭据缺失已在门禁区拦截 ----
             inventory = None
             if run_step.run_on == "target":
-                if not msg.targets:
-                    raise InventoryError("run_on=target 但 targets 为空")
                 inventory = stack.enter_context(self._inventory.build(
                     msg.targets, os.path.join(exec_dir, "inventory"), redactor))
 

@@ -22,7 +22,7 @@ runner/
 ├── kafka/           # consumer(job-dispatch) + producer(job-events)
 ├── vault_client.py  # AppRole 取钥，KV v2 任意 path#field，内存 TTL 缓存
 ├── git_fetcher.py   # git clone --depth 1 --branch <tag>（pinned，不可移动）
-├── inventory.py     # targets → inventory JSON + 临时 keyfile(0600, 用完即删)；无 targets 不建
+├── inventory.py     # 逐台凭据 + gateway ProxyCommand + 临时 keyfile(0600, 用完即删)；无 targets 不建
 ├── secrets_resolver.py  # v27：secrets/存量 _ref 统一解析为 env，executor 前置
 ├── redact.py        # 出机前脱敏（Vault 取值进掩码列表）
 ├── executors/       # v27 注册表型：type → handler，统一 run(step, ctx)
@@ -40,7 +40,8 @@ runner/
 2. exec_type 门禁：未知类型在 step_started 前回流 prepare 失败
 3. `git clone --depth 1 --branch <code_ref>` 取代码快照
 4. secrets 解析前置：`{VAR: "path#field"}` + 存量 `*_ref` params → 同名 env，进脱敏列表
-5. `run_on=target` 时 Vault 取钥 → 临时 keyfile(0600) → 拼 inventory；local/无 targets 不建
+5. `run_on=target` 时逐台解析凭据（targets 自带 > connection 兠底，v31）→ 临时 keyfile(0600) → 拼 inventory；
+   `gateway` 非空的目标渲染 ProxyCommand 跳板（显式 `-i`，v32）；local/无 targets 不建
 6. 注册表分发 executor 执行单步（多目标并发度 = 部署级 `RUNNER_MAX_PARALLEL_HOSTS`，v30）
 7. 事件流回流：`step_started → log(seq 递增) → step_finished → execution_finished`
 8. `command=rollback` 时：重跑同一 entry 并注入 `BINGOPS_ACTION=undo`
