@@ -67,8 +67,14 @@ class VaultClient:
                 ttl_sec: int = _DEFAULT_TTL_SEC) -> str:
         """读 KV v2 任意路径的指定字段（v27 secrets 契约：path#field）。
 
-        缓存键含 path+field；取出的值由调用方负责注册进 redact。
+        容错 mount 前缀：vault_ref 允许 Vault CLI 习惯的完整形状
+        （如 secret/bingops/keys/x），而 mount_point 参数已带 secret，
+        不剥会拼出 secret/data/secret/... 导致 permission denied。
+        缓存键含归一后的 path+field；取出的值由调用方负责注册进 redact。
         """
+        mount = self._config.vault_kv_mount
+        if path.startswith(f"{mount}/"):
+            path = path[len(mount) + 1:]
         cache_key = f"{path}#{field}"
         cached = self._cache.get(cache_key)
         if cached and time.time() < cached[1]:
