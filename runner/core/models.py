@@ -92,7 +92,8 @@ class DispatchMessage:
     """job-dispatch 消息；command=execute | rollback。
 
     v29：steps 数组已废，改为单个 step 对象；secrets 为 {变量名: Vault路径#字段}，
-    只带钥匙名，明文由 runner 现场取。凭据两级结构：消息级 connection 打底，
+    只带钥匙名，明文由 runner 现场取。凭据两级结构（v34）：消息级 connection
+    是执行期快照（存量兑底 + 本次执行填写的 ssh_user/ssh_key_ref/become）打底，
     target 级同名字段非空可覆盖。
     """
 
