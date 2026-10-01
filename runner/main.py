@@ -21,7 +21,7 @@ from collections import OrderedDict
 from itertools import count
 
 from runner.core.config import Config
-from runner.core.exceptions import InventoryError, RunnerError
+from runner.core.exceptions import ExecutorError, InventoryError, RunnerError
 from runner.core.logging import setup_logging
 from runner.core.models import DispatchMessage, StepEvent
 from runner.executors import StepContext
@@ -37,6 +37,10 @@ from runner.vault_client import VaultClient
 logger = logging.getLogger(__name__)
 
 _DEDUP_MAX = 10_000
+
+# v38：入口是仓库文件的类型才需要 code_ref（与控制面 requires_code_ref 同表）；
+# shell 内联命令无代码依赖，code_ref 空串合法，跳过 git clone
+_CODE_REQUIRED_TYPES = {"ansible", "script", "python", "terraform"}
 
 
 class JobWorker:
@@ -154,7 +158,8 @@ class JobWorker:
         step = msg.step
 
         # ---- 门禁区：都在 step_started 之前回流 prepare 失败 ----
-        # 1) exec_type 未知；2) run_on=target 但 targets 空/凭据两级均缺（v34，bingops 已前置 400，runner 兑底）
+        # 1) exec_type 未知；2) run_on=target 但 targets 空/凭据两级均缺（v34）；
+        # 3) 代码型入口缺 code_ref；4) git clone 失败（v38：拉不到代码不得静默当“没代码”跑）
         try:
             executor = get_executor(step)
             if step.run_on == "target":
@@ -165,6 +170,16 @@ class JobWorker:
                     raise InventoryError(
                         "以下目标无可用凭据（执行填写与 connection 兜底均未命中）："
                         + ", ".join(missing))
+            if msg.code_ref:
+                repo_dir = self._git.fetch(
+                    msg.code_ref, os.path.join(exec_dir, "repo"))
+            elif step.type in _CODE_REQUIRED_TYPES:
+                raise ExecutorError(
+                    f"exec_type={step.type} 的入口是仓库文件，code_ref 不能为空")
+            else:
+                # shell 内联命令：无代码依赖，cwd 落在 exec 临时目录
+                os.makedirs(exec_dir, exist_ok=True)
+                repo_dir = exec_dir
         except RunnerError as e:
             logger.error("execution %s 门禁失败: %s", msg.execution_id, e)
             emit("prepare", "step_started")
@@ -175,9 +190,6 @@ class JobWorker:
         emit(step.key, "step_started")
         stack = contextlib.ExitStack()
         try:
-            # ---- 准备阶段：git clone pinned tag ----
-            repo_dir = self._git.fetch(msg.code_ref, os.path.join(exec_dir, "repo"))
-
             # ---- secrets 解析前置（executor 之前），失败即 step 失败 ----
             params, secrets_env = self._resolver.resolve(
                 msg.secrets, msg.params, redactor)

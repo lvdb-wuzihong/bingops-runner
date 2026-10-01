@@ -98,7 +98,7 @@ class DispatchMessage:
 
     message_id: str
     execution_id: int
-    code_ref: str
+    code_ref: str          # v38：shell 内联命令不依赖仓库代码，可为空串
     params: dict[str, Any]
     targets: list[Target]
     step: StepSpec
@@ -121,7 +121,7 @@ class DispatchMessage:
         return cls(
             message_id=d["message_id"],
             execution_id=int(d["execution_id"]),
-            code_ref=d["code_ref"],
+            code_ref=d.get("code_ref") or "",
             params=d.get("params") or {},
             targets=targets,
             step=StepSpec.from_dict(step_dict),

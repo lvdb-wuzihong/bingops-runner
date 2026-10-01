@@ -242,6 +242,7 @@ steps:
 - `runbooks.version` 整数，每次编辑 +1
 - 任务创建时 **runbook_version + steps + code_ref（git tag）三快照** 进 execution 行——在跑任务永远用创建时的定义与代码
 - code_ref 回落链（v36）：**显式传 > 平台配置 `BINGOPS_JOB_DEFAULT_CODE_REF` > 400**。`runbook.default_code_ref` 已删——在模板上缓存版本会把“选错旧 tag”变成静默默认；前端用「复用上次的版本」从执行历史带入。回落只影响**创建时填什么**，不影响快照：解析后的实际值照旧写入 execution 行
+- **但只有依赖仓库代码的类型才必填**（v38）：`ansible` / `script` / `python` / `terraform` 的入口是仓库里的文件，必须固定版本；`shell` 的 entry 是内联命令，runner 不 clone 任何代码，code_ref 留空即合法（消息里为空串，runner 跳过 clone）。判据在 `job_service.requires_code_ref(exec_type)`，执行创建与工单下发共用——v36 曾对所有类型一刀切必填，“跑一句 df -h”会被 400 卡住
 
 ### 3.5 步骤类型契约（v27 多执行器）
 
@@ -631,6 +632,7 @@ bingops-runner/
 #### runner 侧实现清单（v27 多执行器 + v29 扁平单步）
 
 1. **消息形态（v29 破坏性变更）**：`steps` 数组 → `step` 单对象；入口字段统一叫 `entry`，语义按 `type` 分叉（shell 恒为命令字符串）
+   - **v38：`code_ref` 为空串时跳过 `git clone`**（内联 shell 命令无代码依赖），只有 `ansible/script/python/terraform` 才需要拉仓库；拉不到代码时回流 `prepare` 失败事件，不能静默当“没代码”跑
 2. **executor 注册表**：`EXECUTORS: dict[type, Executor]`，统一接口 `run(step, ctx) -> (status, exit_code)`；**未知 type 回流 `prepare` 失败事件**，绝不静默丢弃（否则任务永久卡 running）
 3. **StepContext 统一注入**：`params`（extra_vars / env）、`secrets`（已解析）、`targets`、`connection`、`workdir`（仓库 clone 根）、`event emitter`、`redact 列表`
    - **v34 凭据优先级**：`target.ssh_key_ref` > `connection.ssh_key_ref`；`target.ssh_user` > `connection.ssh_user`。**登录用户与钥匙由执行面解析后写入**（`ExecutionCreate.ssh_user` + `ssh_credential` → 目录展开成 Vault 引用），同一执行内同值；两者皆空且 `run_on=target` 属于上游漏配（bingops 已在创建执行时 400），runner 仍须回流 `prepare` 失败而不是抛异常
@@ -660,7 +662,7 @@ bingops-runner/
 | 参数区 | `params_schema` + `secrets_schema` 合成**一张表**：每行「名字 / 类型 / 必填 / 默认 / 是否密钥」，勾选即拆进 `secrets_schema`。**两个 JSON 文本框归零，存储仍是三层分离** | 手写 JSON 正是“两小时写不出一个 runbook”的直接原因 |
 | 步骤字段 | 只剩 `timeout_sec` 一个可选字段（**v30 已删 `undo_command`/`serial`/`batch_pause_sec`，v37 已删 `rollbackable`**，继续提交会被忽略）；`steps` 同样已不存在 | 表单里留着永远不填的字段 = 每次都要重新理解一遍它是什么意思 |
 | 编辑回显 | 直读 runbook 响应的**步骤列**（`exec_type`/`entry`/`run_on`/`timeout_sec`，v29 已无 steps 数组；`run_on` 已显式回写） | 自己再推一遍缺省值，与后端推断不一致 |
-| 新增执行 | **目标机与版本必须每次选**（v36：runbook 已无默认值可预填）；可选做「复用上次的目标机 / 版本」按钮，数据源取当前用户对该 runbook 的最近一次 `job_executions`；无 target 型任务不渲染机器选择器 | 把“打到哪台”变成不假思索的预选项；或者强迫用户每次背 CMDB 数 ID 与 git tag |
+| 新增执行 | **目标机必须每次选**（v36）；**代码版本框按 exec_type 显隐**（v38：shell 内联命令不依赖仓库代码，不渲染该框；ansible/script/python 才显示且必填）；可选做「复用上次的目标机 / 版本」按钮，数据源取当前用户对该 runbook 的最近一次 `job_executions`；无 target 型任务不渲染机器选择器 | 把“打到哪台”变成不假思索的预选项；或给内联命令强要一个 git tag（v36 的错，已修） |
 | **执行弹窗连接区**（v34 新增） | 三个输入件：**登录用户**（文本框）+ **SSH 钥匙**（下拉，数据源 `GET /api/v1/credentials?kind=ssh_key`，提交 `ssh_credential=条目名`）+ **提权开关**（默认关）；另有可选 **中转网关** 下拉（`GET /api/v1/job-gateways`，留空自动选路）。目标型任务缺用户/钥匙后端 400，报错文案已可直接展示 | 不给入口用户就只能把身份写在 runbook 里，回到“定义期猜钥匙”的老路 |
 | 执行详情 | **回滚相关的一切已下线**（v37）：`rollbackable` / `rollback_policy` / `attempt_type` 不再出现在响应体，回滚按钮与 `rolling_back`/`rolled_back`/`rollback_failed` 状态渲染全部移除；失败态就一个 `failed` | 留着回滚按钮 = 用户以为出事可以一键撤销（实际不能） |
 | **凭据目录页** | `GET /api/v1/credentials?kind=ssh_key` 供执行弹窗下拉；详情页挂 `GET /{id}/usage` 展示引用反查（轮换前必看）；**表单只剩 4 个框**（v36）：名称 / 类型 / **Vault 引用（单串 `vault_ref`，形如 `ssh/keys/ops#private_key`）** / 备注——**已删：登录用户（v33）、适用范围云账号与区域、设为默认（v36）**；不得出现任何明文凭据输入框 | 回到手打路径的老问题；误删在用的钥匙；给用户两个“填了也不会发生”的框 |

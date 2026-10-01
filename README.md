@@ -39,7 +39,8 @@ runner/
 
 1. message_id 去重 → 信号量获取并发位
 2. exec_type 门禁：未知类型在 step_started 前回流 prepare 失败
-3. `git clone --depth 1 --branch <code_ref>` 取代码快照
+3. `code_ref` 非空时 `git clone --depth 1 --branch <code_ref>` 取代码快照；
+   shell 内联命令 code_ref 可空、跳过 clone（v38），代码型入口缺 code_ref 或 clone 失败回流 prepare 失败
 4. secrets 解析前置：`{VAR: "path#field"}` + 存量 `*_ref` params → 同名 env，进脱敏列表
 5. `run_on=target` 时逐台解析凭据（targets 自带 > connection 兠底，v31）→ 临时 keyfile(0600) → 拼 inventory；
    `gateway` 非空的目标渲染 ProxyCommand 跳板（显式 `-i`，v32）；local/无 targets 不建
