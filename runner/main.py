@@ -4,8 +4,7 @@
 - message_id 去重（at-least-once 重放防护，进程内有界 LRU）
 - 信号量限流：单 runner 并发 execution 数 = RUNNER_MAX_CONCURRENT
 - 优雅退出：SIGTERM/SIGINT 停消费，等待在跑 execution 的当前 step 结束
-- 回滚：command=rollback 时重跑同一 entry 并注入 BINGOPS_ACTION=undo
-  （ansible 另有 extra_vars bingops_action；v30 已删 undo_command 约定）
+- v37：回滚能力已整体下线，消息只剩“执行”一种语义；失败即落 failed 终态
 
 纪律：runner 不写业务表，只通过 job-events 回流；消息解析失败用
 step_key="prepare" 的失败事件告知控制面，运行期失败闭合在真实 step_key 上。
@@ -70,12 +69,10 @@ class JobWorker:
             logger.error("dispatch 契约校验失败: %s payload=%s", e, payload)
             execution_id = payload.get("execution_id")
             if execution_id is not None:
-                # attempt_type 跟随 command：rollback 下发失败时控制面才能收到回滚链的收尾信号
-                attempt = "rollback" if payload.get("command") == "rollback" else "do"
-                self._emit_contract_failure(int(execution_id), str(e), attempt)
+                self._emit_contract_failure(int(execution_id), str(e))
             return
-        logger.info("收到 dispatch: command=%s execution_id=%s code_ref=%s",
-                    msg.command, msg.execution_id, msg.code_ref)
+        logger.info("收到 dispatch: execution_id=%s code_ref=%s exec_type=%s",
+                    msg.execution_id, msg.code_ref, msg.step.type)
         t = threading.Thread(
             target=self._guarded_run, args=(msg,),
             name=f"exec-{msg.execution_id}", daemon=False,
@@ -96,27 +93,22 @@ class JobWorker:
                 self._dedup.popitem(last=False)
             return False
 
-    def _emit_contract_failure(self, execution_id: int, error: str,
-                               attempt_type: str = "do") -> None:
+    def _emit_contract_failure(self, execution_id: int, error: str) -> None:
         """消息无法解析时，以 prepare 伪步骤告知控制面 execution 失败。"""
         try:
             self._producer.send_event(StepEvent(
                 message_id=str(uuid.uuid4()), execution_id=execution_id,
-                step_key="prepare", attempt_type=attempt_type,
-                event_type="step_started", seq=1,
+                step_key="prepare", event_type="step_started", seq=1,
             ))
             self._producer.send_event(StepEvent(
                 message_id=str(uuid.uuid4()), execution_id=execution_id,
-                step_key="prepare", attempt_type=attempt_type,
-                event_type="step_finished", seq=2,
+                step_key="prepare", event_type="step_finished", seq=2,
                 status="failed", error=f"dispatch 契约校验失败: {error}",
             ))
             self._producer.send_event(StepEvent(
                 message_id=str(uuid.uuid4()), execution_id=execution_id,
-                step_key="", attempt_type=attempt_type,
-                event_type="execution_finished", seq=3,
-                status="rollback_failed" if attempt_type == "rollback" else "failed",
-                error=f"dispatch 契约校验失败: {error}",
+                step_key="", event_type="execution_finished", seq=3,
+                status="failed", error=f"dispatch 契约校验失败: {error}",
             ))
             self._producer.flush()
         except Exception:
@@ -142,29 +134,27 @@ class JobWorker:
             self._config.workdir, "executions",
             f"{msg.execution_id}-{msg.message_id[:8]}")
 
-        def emit(step_key: str, attempt_type: str, event_type: str, **kw) -> None:
+        def emit(step_key: str, event_type: str, **kw) -> None:
             event = StepEvent(
                 message_id=str(uuid.uuid4()),
                 execution_id=msg.execution_id,
-                step_key=step_key, attempt_type=attempt_type,
-                event_type=event_type, seq=next(seq), **kw,
+                step_key=step_key, event_type=event_type,
+                seq=next(seq), **kw,
             )
             self._producer.send_event(event)
 
-        def on_log(step_key: str, attempt_type: str):
+        def on_log(step_key: str):
             def cb(level: str, host: str | None, line: str) -> None:
-                emit(step_key, attempt_type, "log", level=level,
+                emit(step_key, "log", level=level,
                      host=host, line=redactor.apply(line))
             return cb
 
-        is_rollback = msg.command == "rollback"
-        attempt = "rollback" if is_rollback else "do"
-        # 悲观默认：任何未预期路径都落 failed/rollback_failed，不得静默
-        outcome = "rollback_failed" if is_rollback else "failed"
+        # 悲观默认：任何未预期路径都落 failed，不得静默（v37：无回滚态）
+        outcome = "failed"
         step = msg.step
 
         # ---- 门禁区：都在 step_started 之前回流 prepare 失败 ----
-        # 1) exec_type 未知；2) run_on=target 但 targets 空/凭据两级均缺（v31，bingops 已前置 400，runner 兑底）
+        # 1) exec_type 未知；2) run_on=target 但 targets 空/凭据两级均缺（v34，bingops 已前置 400，runner 兑底）
         try:
             executor = get_executor(step)
             if step.run_on == "target":
@@ -173,27 +163,16 @@ class JobWorker:
                 missing = [t.name for t in msg.targets if not t.ssh_key_ref]
                 if missing:
                     raise InventoryError(
-                        "以下目标无可用凭据（主机标签与 connection 兜底均未命中）："
+                        "以下目标无可用凭据（执行填写与 connection 兜底均未命中）："
                         + ", ".join(missing))
         except RunnerError as e:
             logger.error("execution %s 门禁失败: %s", msg.execution_id, e)
-            emit("prepare", attempt, "step_started")
-            emit("prepare", attempt, "step_finished", status="failed", error=str(e))
-            emit("", attempt, "execution_finished", status=outcome, error=str(e))
+            emit("prepare", "step_started")
+            emit("prepare", "step_finished", status="failed", error=str(e))
+            emit("", "execution_finished", status=outcome, error=str(e))
             return
 
-        # ---- 回滚空转：不可逆步骤不进回滚链 ----
-        if is_rollback and not step.rollbackable:
-            logger.warning("execution %s 步骤 %s 不可回滚，回滚空转",
-                           msg.execution_id, step.key)
-            emit("", attempt, "execution_finished", status="rolled_back")
-            return
-
-        # ---- 回滚统一约定（v30）：重跑同一 entry + BINGOPS_ACTION=undo；
-        # 入口没实现 undo 分支就执行失败回流 rollback_failed（可见，不静默） ----
-        run_step = step
-
-        emit(step.key, attempt, "step_started")
+        emit(step.key, "step_started")
         stack = contextlib.ExitStack()
         try:
             # ---- 准备阶段：git clone pinned tag ----
@@ -206,45 +185,41 @@ class JobWorker:
             # ---- inventory 条件化：run_on=local 或无 targets 不建不取钥；
             # 凭据缺失已在门禁区拦截 ----
             inventory = None
-            if run_step.run_on == "target":
+            if step.run_on == "target":
                 inventory = stack.enter_context(self._inventory.build(
                     msg.targets, os.path.join(exec_dir, "inventory"), redactor))
 
             ctx = StepContext(
                 repo_dir=repo_dir,
-                workdir=os.path.join(exec_dir, f"step-{run_step.key}"),
+                workdir=os.path.join(exec_dir, f"step-{step.key}"),
                 params=params,
                 secrets_env=secrets_env,
-                action="undo" if is_rollback else "do",
                 targets=msg.targets,
                 connection=msg.connection,
                 inventory=inventory,
-                event_cb=on_log(step.key, attempt),
+                event_cb=on_log(step.key),
                 redactor=redactor,
-                timeout_sec=run_step.timeout_sec or self._config.default_step_timeout_sec,
+                timeout_sec=step.timeout_sec or self._config.default_step_timeout_sec,
                 max_parallel_hosts=self._config.max_parallel_hosts,
             )
-            result = executor.run(run_step, ctx)
-            emit(step.key, attempt, "step_finished",
+            result = executor.run(step, ctx)
+            emit(step.key, "step_finished",
                  status="success" if result.ok else "failed",
                  exit_code=result.rc, error=result.error)
-            if result.ok:
-                outcome = "rolled_back" if is_rollback else "success"
-            else:
-                outcome = "rollback_failed" if is_rollback else "failed"
+            outcome = "success" if result.ok else "failed"
 
         except RunnerError as e:
             # 准备/运行阶段可预期失败：闭合在真实 step_key 上（step_started 已发）
             logger.error("execution %s 失败: %s", msg.execution_id, e)
-            emit(step.key, attempt, "step_finished", status="failed", error=str(e))
+            emit(step.key, "step_finished", status="failed", error=str(e))
         except Exception:
             logger.exception("execution %s 意外异常", msg.execution_id)
-            emit(step.key, attempt, "step_finished", status="failed",
+            emit(step.key, "step_finished", status="failed",
                  error="runner 内部错误")
         finally:
             stack.close()
-            # execution 级终态事件：控制面靠它落 rolling_back/running 的终态
-            emit("", attempt, "execution_finished", status=outcome)
+            # execution 级终态事件：控制面靠它落 running 的终态（v37：只有 success/failed）
+            emit("", "execution_finished", status=outcome)
             shutil.rmtree(exec_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------

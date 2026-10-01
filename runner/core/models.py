@@ -49,12 +49,13 @@ class Target:
 
 @dataclass
 class StepSpec:
-    """唯一步骤定义快照（v29 扁平单步，v30 收敛为 5 字段）。
+    """唯一步骤定义快照（v29 扁平单步，v30/v37 收敛为 4 字段）。
 
-    entry 语义随 type 分叉：ansible=playbook 路径 / shell=命令字符串 /
-    python=仓库内脚本入口 / terraform=工作目录。run_on 缺省按 type 推断。
-    v30 已删：serial/batch_pause_sec（并发度下沉 runner 配置 max_parallel_hosts）、
-    undo_command（回滚统一 BINGOPS_ACTION=undo 约定）。旧消息带这些键会被忽略。
+    entry 语义随 type 分叉（v36）：ansible=playbook 路径 / shell=内联命令 /
+    script=仓库内脚本文件路径 / python=仓库内脚本入口 / terraform=工作目录。
+    run_on 缺省按 type 推断。
+    已删字段（旧消息带这些键会被忽略）：v30 serial/batch_pause_sec/undo_command，
+    v37 rollbackable（平台回滚能力整体下线）。
     """
 
     key: str
@@ -63,7 +64,6 @@ class StepSpec:
     run_on: str  # target | local
     entry: str
     timeout_sec: int | None = None
-    rollbackable: bool = True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "StepSpec":
@@ -78,27 +78,25 @@ class StepSpec:
             run_on=d.get("run_on") or _DEFAULT_RUN_ON.get(step_type, "target"),
             entry=entry,
             timeout_sec=d.get("timeout_sec"),
-            rollbackable=bool(d.get("rollbackable", True)),
         )
 
 
-# exec_type → run_on 缺省（与控制面 EXEC_TYPE_RUN_ON 同表）
-_DEFAULT_RUN_ON = {"ansible": "target", "shell": "target",
+# exec_type → run_on 缺省（与控制面 EXEC_TYPE_RUN_ON 同表；v36 新增 script）
+_DEFAULT_RUN_ON = {"ansible": "target", "shell": "target", "script": "target",
                    "python": "local", "terraform": "local"}
 
 
 @dataclass
 class DispatchMessage:
-    """job-dispatch 消息；command=execute | rollback。
+    """job-dispatch 消息（v37：`command` 字段已删，消息只剩“执行”一种语义）。
 
     v29：steps 数组已废，改为单个 step 对象；secrets 为 {变量名: Vault路径#字段}，
     只带钥匙名，明文由 runner 现场取。凭据两级结构（v34）：消息级 connection
     是执行期快照（存量兑底 + 本次执行填写的 ssh_user/ssh_key_ref/become）打底，
-    target 级同名字段非空可覆盖。
+    target 级同名字段非空可覆盖。旧消息的 command/rollback_of 键被忽略。
     """
 
     message_id: str
-    command: str
     execution_id: int
     code_ref: str
     params: dict[str, Any]
@@ -106,7 +104,6 @@ class DispatchMessage:
     step: StepSpec
     secrets: dict[str, str] = field(default_factory=dict)
     connection: dict[str, Any] = field(default_factory=dict)
-    rollback_of: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DispatchMessage":
@@ -123,7 +120,6 @@ class DispatchMessage:
             raise KeyError("step")
         return cls(
             message_id=d["message_id"],
-            command=d["command"],
             execution_id=int(d["execution_id"]),
             code_ref=d["code_ref"],
             params=d.get("params") or {},
@@ -131,24 +127,22 @@ class DispatchMessage:
             step=StepSpec.from_dict(step_dict),
             secrets=d.get("secrets") or {},
             connection=conn,
-            rollback_of=d.get("rollback_of"),
         )
 
 
 @dataclass
 class StepEvent:
-    """job-events 消息体（runner → bingops）。"""
+    """job-events 消息体（runner → bingops）；v37 已删 attempt_type。"""
 
     message_id: str
     execution_id: int
     step_key: str
-    attempt_type: str  # do | rollback
-    event_type: str  # step_started | log | step_finished
+    event_type: str  # step_started | log | step_finished | execution_finished
     seq: int | None = None
     level: str = "info"
     host: str | None = None
     line: str | None = None
-    status: str | None = None  # success | failed（step_finished 时）
+    status: str | None = None  # success | failed
     exit_code: int | None = None
     error: str | None = None
     timestamp: str = field(default_factory=utc_now_iso)
@@ -158,7 +152,6 @@ class StepEvent:
             "message_id": self.message_id,
             "execution_id": self.execution_id,
             "step_key": self.step_key,
-            "attempt_type": self.attempt_type,
             "event_type": self.event_type,
             "seq": self.seq,
             "level": self.level,

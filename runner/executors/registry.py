@@ -8,12 +8,14 @@ from runner.core.exceptions import ExecutorError
 from runner.core.models import StepSpec
 from runner.executors.ansible_executor import AnsibleExecutor
 from runner.executors.python_executor import PythonExecutor
+from runner.executors.script_executor import ScriptExecutor
 from runner.executors.shell_executor import ShellExecutor
 from runner.executors.terraform_executor import TerraformExecutor
 
 EXECUTORS = {
     "ansible": AnsibleExecutor,
     "shell": ShellExecutor,
+    "script": ScriptExecutor,    # v36：仓库脚本推送执行（ansible script 模块）
     "python": PythonExecutor,
     "terraform": TerraformExecutor,  # 门控未开：state 方案未定，本轮拒绝执行
 }

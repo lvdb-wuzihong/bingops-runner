@@ -26,9 +26,10 @@ runner/
 ├── secrets_resolver.py  # v27：secrets/存量 _ref 统一解析为 env，executor 前置
 ├── redact.py        # 出机前脱敏（Vault 取值进掩码列表）
 ├── executors/       # v27 注册表型：type → handler，统一 run(step, ctx)
-│   ├── registry.py           # ansible / shell / python / terraform(门控占位)
-│   ├── ansible_executor.py   # 事件回调 → job-events；多目标分批；超时强杀
-│   ├── shell_executor.py     # target 复用 ansible ad-hoc；local 走 subprocess
+│   ├── registry.py           # ansible / shell / script / python / terraform(门控占位)
+│   ├── ansible_executor.py   # 事件回调 → job-events；多目标分批；超时强杀；共享 playbook 管道
+│   ├── shell_executor.py     # 内联命令；target 走动态 playbook+environment；local subprocess
+│   ├── script_executor.py    # v36：仓库脚本经 ansible script 模块推送执行
 │   ├── python_executor.py    # subprocess + 镜像内置依赖
 │   └── terraform_executor.py # 门控未开，P2 点亮
 └── main.py          # 信号量限流 / message_id 去重 / 优雅退出 / 单步编排
@@ -43,10 +44,8 @@ runner/
 5. `run_on=target` 时逐台解析凭据（targets 自带 > connection 兠底，v31）→ 临时 keyfile(0600) → 拼 inventory；
    `gateway` 非空的目标渲染 ProxyCommand 跳板（显式 `-i`，v32）；local/无 targets 不建
 6. 注册表分发 executor 执行单步（多目标并发度 = 部署级 `RUNNER_MAX_PARALLEL_HOSTS`，v30）
-7. 事件流回流：`step_started → log(seq 递增) → step_finished → execution_finished`
-8. `command=rollback` 时：重跑同一 entry 并注入 `BINGOPS_ACTION=undo`
-   （ansible 同时保留 extra_vars `bingops_action` 兼容存量 playbook；v30 已删 undo_command）；
-   不可逆步骤回滚空转
+7. 事件流回流：`step_started → log(seq 递增) → step_finished → execution_finished`（success/failed）
+8. v37：平台回滚能力已整体下线——消息无 `command`，失败即落 `failed` 终态，由人看日志修复后重新发起
 9. 结束清理：keyfile 删除、工作目录清除
 
 ## 本地开发
