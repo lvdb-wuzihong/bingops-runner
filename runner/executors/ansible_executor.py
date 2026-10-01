@@ -98,17 +98,33 @@ def subset_inventory(inventory_path: str, hosts: list[str], dest: str) -> str:
 
 
 def make_event_handler(event_cb) -> tuple[Any, dict]:
-    """返回 (event_handler, 主机事件计数器)；error 行同时落 runner 进程日志。"""
+    """返回 (event_handler, 主机事件计数器)；error 行同时落 runner 进程日志。
+
+    除任务状态摘要行外，还把命令结果正文（stdout/stderr/debug msg）逐行上报，
+    否则 shell/script 任务在控制面只能看到 [changed] 看不到执行输出。
+    """
     host_event_count = {"n": 0}
 
     def event_handler(data: dict) -> bool:
-        if data.get("event", "").startswith("runner_on_"):
+        event = data.get("event", "")
+        if event.startswith("runner_on_"):
             host_event_count["n"] += 1
         level, host, line = describe_event(data)
         if line:
             if level == "error":
                 logger.error("ansible: host=%s %s", host, line)
             event_cb(level, host, line)
+        if event in ("runner_on_ok", "runner_on_failed"):
+            res = (data.get("event_data") or {}).get("res") or {}
+            # debug 模块的输出在 msg；命令/脚本在 stdout/stderr
+            if event == "runner_on_ok" and res.get("msg"):
+                event_cb("info", host, str(res["msg"]))
+            stdout = res.get("stdout_lines") or (res.get("stdout") or "").splitlines()
+            for l in stdout:
+                event_cb("info", host, str(l))
+            stderr = res.get("stderr_lines") or (res.get("stderr") or "").splitlines()
+            for l in stderr:
+                event_cb("warn", host, str(l))
         return True
 
     return event_handler, host_event_count
