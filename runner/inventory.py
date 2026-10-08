@@ -99,11 +99,13 @@ class InventoryBuilder:
                     user = gw.get("ssh_user") or "root"
                     host_addr = gw.get("host")
                     port = gw.get("port") or 22
-                    # 跳板钥必须显式 -i：ansible_ssh_private_key_file 只作用于最终目标
+                    # 跳板钥必须显式 -i：ansible_ssh_private_key_file 只作用于最终目标；
+                    # 跳板端口必须 -p：ssh 的 destination 无 user@host:port 冒号语法（scp 写法），
+                    # 否则 gw_host:port 被整体当主机名解析，proxy 立即退出 → UNREACHABLE
                     host_vars["ansible_ssh_common_args"] = (
                         f'{_SSH_ARGS} -o ProxyCommand="ssh -i {gpath} '
                         f'-o StrictHostKeyChecking=accept-new '
-                        f'-W %h:%p {user}@{host_addr}:{port}"'
+                        f'-p {port} -W %h:%p {user}@{host_addr}"'
                     )
                     logger.info("target %s 经网关 %s 中转", t.name, gw.get("name"))
                 if t.become:

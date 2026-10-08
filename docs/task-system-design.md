@@ -643,7 +643,7 @@ bingops-runner/
    - **v30：多目标并发度改由 runner 自己的配置 `max_parallel_hosts` 决定**（部署级），消息里不再下发 `serial` / `batch_pause_sec`；需要“逐台执行”就是把该配置调成 1
 6. **python**：`subprocess`，cwd=仓库根，env 含 params+secrets，stdout/stderr 逐行 → log 事件，退出码 → step 状态；依赖策略 = 镜像内置 `requirements.txt`（加 SDK 即重建镜像），每任务临时 venv 作退路
 7. **inventory 构建条件化**：`targets` 为空或 `run_on=local` 时不建 inventory、不取 SSH 私钥
-   - **v32 跳板渲染**：`target.gateway` 非空则为该主机渲染 `ansible_ssh_common_args = -o ProxyCommand='ssh -i <跳板临时钥> -o StrictHostKeyChecking=accept-new -W %h:%p <gateway.ssh_user>@<gateway.host>:<gateway.port>'`——**必须显式 `-i`**：`ansible_ssh_private_key_file` 只作用于最终目标，`ProxyJump=user@host` 简写不认它；`gateway.ssh_key_ref` 为 null 时复用目标主机同一把钥匙；跳板钥同 Vault 纪律（临时 0600、用完即删、进 redact）
+   - **v32 跳板渲染**：`target.gateway` 非空则为该主机渲染 `ansible_ssh_common_args = -o ProxyCommand='ssh -i <跳板临时钥> -o StrictHostKeyChecking=accept-new -p <gateway.port> -W %h:%p <gateway.ssh_user>@<gateway.host>'`——**必须显式 `-i`**：`ansible_ssh_private_key_file` 只作用于最终目标，`ProxyJump=user@host` 简写不认它；**跳板端口必须用 `-p`**：ssh 命令行的 destination 无 `user@host:port` 冒号语法（那是 scp 的写法，`gw_host:port` 会被整体当主机名解析，proxy 立即退出 → UNREACHABLE “Connection closed by UNKNOWN port 65535”；`-W %h:%p` 的冒号是转发目标格式，与 destination 无关）；`gateway.ssh_key_ref` 为 null 时复用目标主机同一把钥匙；跳板钥同 Vault 纪律（临时 0600、用完即删、进 redact）
 8. **v37：回滚已下线**——消息里没有 `command`，也没有 `BINGOPS_ACTION=undo` 注入。runner 只需处理“执行”一种语义；失败就回流 `step_finished(failed)` + `execution_finished(failed)`
 
 ### 9.4 API 端点（bingops，P1）
