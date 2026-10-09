@@ -88,6 +88,9 @@ class VaultClient:
             value = resp["data"]["data"].get(field)
         except Exception as e:
             raise VaultError(f"读取 secret 失败 [{cache_key}]: {_vault_error_detail(e)}") from e
+        # strip 首尾空白：录入噪音（尾换行/空格）会让 AK 进 HTTP 签名头报 InvalidHeader，
+        # 且带换行的注册值在异常 repr 转义后按值匹配脱敏会逃逸；语义值不应有首尾空白
+        value = value.strip() if isinstance(value, str) else value
         if not value:
             raise VaultError(f"secret [{cache_key}] 缺少字段 {field}")
 
